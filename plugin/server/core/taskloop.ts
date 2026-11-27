@@ -5,7 +5,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { filesFromBase, paseoScripts, resolveChecks, tail, type TaskChecks } from "./checks";
-import { assertIntegrationUntouched, featureAllowsAutoStart, featureDir } from "./features";
+import { assertIntegrationUntouched, featureAllowsAutoStart, featureDir, steering } from "./features";
 import { changedPaths, commitAll, FOUNDRY_IDENT, git, head, HOST_IDENT, identEnv, sh, treeOf } from "./git";
 import type { Host } from "./host";
 import type { Locks } from "./locks";
@@ -161,9 +161,13 @@ export class TaskLoop {
     const checks = parse<TaskChecks>(i.checks, {});
     const f = i.feature_id ? this.store.feature(i.feature_id) : null;
     const step = loop.steps[0] as Extract<LoopStep, { kind: "agent" }>;
+    const p = this.store.project(i.project_id)!;
+    const reqRefs = parse<string[]>(i.requirement_refs, []);
+    const reqs = f ? this.store.requirements(f.id).filter((r) => reqRefs.includes(r.ref)) : [];
     return [
       `You are a Foundry builder working on ${i.key}: ${i.title}.`,
       i.description,
+      reqs.length ? `Requirements it covers:\n${reqs.map((r) => `- ${r.ref} ${r.title}: ${parse<string[]>(r.criteria, []).join(" ")}`).join("\n")}` : "",
       i.acceptance ? `Acceptance criteria:\n${i.acceptance}` : "",
       deps.length ? `It builds on:\n${deps.join("\n")}` : "",
       touches.length ? `Expected to touch: ${touches.join(", ")}` : "",
@@ -172,6 +176,7 @@ export class TaskLoop {
         : "",
       f ? `The approved spec and plan are in ${featureDir(f.slug)}/spec.md and plan.md. Read them first.` : "",
       step.prompt ?? "",
+      await steering(p.repo, p.base_ref),
       "Make the change with tests. Do not commit: Foundry commits after your turn and runs the project's checks itself.",
       "If you need a decision from the developer, call the ask_human tool. If you can't do the task, call report_verdict with decision fail or human and say why.",
       "End your turn with a short summary of what you changed.",

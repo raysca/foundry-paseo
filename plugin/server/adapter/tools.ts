@@ -64,6 +64,73 @@ export function buildTools(f: Foundry): ToolSet {
       },
     });
 
+  const askQuestions = defineAgentTool({
+    name: "ask_questions",
+    title: "Ask Clarify questions",
+    description:
+      "One Clarify round: at most 7 questions, each with a unique id, the question and your recommended answer. Waits for the developer's answers up to the question window; if the reply says to end your turn, do so.",
+    input: z.object({
+      questions: z.array(z.object({ id: z.string(), text: z.string(), recommended: z.string(), choices: z.array(z.string()).optional() })),
+    }),
+    async execute({ questions }, { agent, signal }) {
+      try {
+        guardRole(f, agent.id, "planner");
+        return { text: await f.planning.askQuestions(agent.id, questions, signal) };
+      } catch (e) {
+        return refusal(e);
+      }
+    },
+  });
+
+  const proposeRequirements = defineAgentTool({
+    name: "propose_requirements",
+    title: "Propose requirements",
+    description: "Hand Foundry the spec's requirements (replaces the list). Refs like R1, R1.1; each acceptance criterion must be EARS. Errors come back to fix.",
+    input: z.object({
+      requirements: z.array(z.object({ ref: z.string(), title: z.string(), acceptance_criteria: z.array(z.string()) })),
+    }),
+    async execute({ requirements }, { agent }) {
+      try {
+        guardRole(f, agent.id, "planner");
+        return ok(f.planning.proposeRequirements(agent.id, requirements));
+      } catch (e) {
+        return refusal(e);
+      }
+    },
+  });
+
+  const proposeTasks = defineAgentTool({
+    name: "propose_tasks",
+    title: "Propose the task graph",
+    description:
+      "Hand Foundry the feature's task graph. Foundry validates it (coverage of every requirement, no cycles, valid dependencies), writes tasks.md and returns waves, the critical path and warnings. Errors come back to fix; nothing is recorded until it passes.",
+    input: z.object({
+      tasks: z.array(
+        z.object({
+          ref: z.string(),
+          title: z.string(),
+          description: z.string().optional(),
+          exit_criteria: z.string().optional(),
+          requirement_refs: z.array(z.string()),
+          depends_on: z.array(z.object({ ref: z.string(), reason: z.string() })).optional(),
+          touches: z.array(z.string()).optional(),
+          size: z.enum(["S", "M", "L"]).optional(),
+          loop: z.string().optional(),
+          checks: z.object({ scripts: z.array(z.string()).optional(), paths: z.array(z.string()).optional() }).optional(),
+          profile: z.string().optional(),
+        }),
+      ),
+    }),
+    async execute({ tasks }, { agent }) {
+      try {
+        guardRole(f, agent.id, "planner");
+        return ok(f.planning.proposeTasks(agent.id, tasks));
+      } catch (e) {
+        return refusal(e);
+      }
+    },
+  });
+
   const none: AgentToolDefinition[] = [];
-  return { builder: [askHuman, verdict("builder")], reviewer: [verdict("reviewer")], planner: none, pm: none };
+  return { builder: [askHuman, verdict("builder")], reviewer: [verdict("reviewer")], planner: [askQuestions, proposeRequirements, proposeTasks], pm: none };
 }

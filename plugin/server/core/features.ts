@@ -54,3 +54,34 @@ export function featureAllowsAutoStart(store: Store, f: Feature) {
   if (store.setting(`feature_hold:${f.id}`)) return false;
   return store.docs(f.id).every((d) => d.status === "approved");
 }
+
+/** .foundry/steering/{product,tech,structure}.md on base, for PM and builder prompts. */
+export async function steering(repo: string, baseRef: string): Promise<string> {
+  const parts: string[] = [];
+  for (const name of ["product", "tech", "structure"]) {
+    const body = await git(repo, "show", `${baseRef}:.foundry/steering/${name}.md`).catch(() => "");
+    if (body.trim()) parts.push(`### ${name}.md\n${body.trim()}`);
+  }
+  return parts.length ? `Project steering (from .foundry/steering on ${baseRef}):\n\n${parts.join("\n\n")}` : "";
+}
+
+/** A slug from a title, unique among the project's features and the repo's feature branches. */
+export async function uniqueSlug(store: Store, projectId: number, repo: string, title: string): Promise<string> {
+  const base =
+    title
+      .toLowerCase()
+      .normalize("NFKD")
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 40)
+      .replace(/-+$/, "") || "feature";
+  for (let n = 1; ; n++) {
+    const slug = n === 1 ? base : `${base}-${n}`;
+    if (store.featureBySlug(projectId, slug)) continue;
+    const branchTaken = await git(repo, "rev-parse", "--verify", "--quiet", `refs/heads/foundry/feature/${slug}`).then(
+      () => true,
+      () => false,
+    );
+    if (!branchTaken) return slug;
+  }
+}

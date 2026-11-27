@@ -7,12 +7,13 @@ import { FoundryError, type Actor } from "./model";
 import { checkSetup, setupReady, type Finding } from "./setup";
 import type { Store } from "./store";
 import { TaskLoop, type LoopSettings } from "./taskloop";
+import { Planning } from "./planning";
 
 export interface FoundryConfig {
   /** Where Foundry keeps its own files (store). Worktrees are Paseo's. */
   home: string;
   /** Read on every use, so a settings change applies to the next step. */
-  loop: () => LoopSettings;
+  loop: () => LoopSettings & { planningTimeoutMs?: number };
   /** How often the scheduler looks for Ready work, in ms. 0 turns the timer off (tests). */
   tickMs?: number;
 }
@@ -21,6 +22,7 @@ export class Foundry {
   private lastSetup: { at: string; findings: Finding[] } | null = null;
   readonly locks = new Locks();
   readonly tasks: TaskLoop;
+  readonly planning: Planning;
   private timer: NodeJS.Timeout | null = null;
 
   constructor(
@@ -45,6 +47,21 @@ export class Foundry {
         },
       },
       () => this.requireSetup(),
+    );
+    this.planning = new Planning(
+      store,
+      host,
+      this.locks,
+      {
+        get questionWindowMs() {
+          return settings().questionWindowMs;
+        },
+        get turnTimeoutMs() {
+          return settings().planningTimeoutMs ?? 15 * 60_000;
+        },
+      },
+      () => this.requireSetup(),
+      () => this.tasks.tick(),
     );
   }
 
@@ -79,6 +96,7 @@ export class Foundry {
   async recover() {
     this.store.event("foundry_started");
     await this.runSetupCheck();
+    await this.planning.recover();
     await this.tasks.recover();
     const ms = this.cfg.tickMs ?? 2000;
     if (ms > 0 && !this.timer)
@@ -104,6 +122,7 @@ export class Foundry {
   async onTurnEnd(agentId: string, outcome: { kind: string; message?: string }, tracked: boolean) {
     const a = this.store.agent(agentId);
     if (a && (a.role === "builder" || a.role === "reviewer")) return this.tasks.onTurnEnd(agentId, outcome, tracked);
+    if (a?.role === "planner") return this.planning.onTurnEnd(agentId, outcome, tracked);
     this.store.event(tracked ? "turn_ended" : "untracked_turn_ended", {
       actor: tracked ? "agent" : "host-user",
       issue: a?.issue_key,

@@ -48,6 +48,8 @@ jobs:
       - run: bash e2e/smoke.sh
       - name: loop 2 (two tasks through build, checks, a fix round, review, a late answer and accept)
         run: bash e2e/loop2.sh
+      - name: loop 1 into loop 2 (idea, Clarify, spec, plan and task list approved, tasks run and accepted)
+        run: bash e2e/loop1.sh
       - name: scripted harness log on failure
         if: failure()
         run: tail -100 "${TMPDIR:-/tmp}/foundry-e2e/scripted.log" || true

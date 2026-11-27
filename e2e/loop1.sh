@@ -1,0 +1,58 @@
+#!/bin/bash
+# Loop 1 into loop 2 on a real daemon: a feature from an idea through a Clarify round answered late,
+# spec, plan and task list approved at their SHAs, then its two tasks run and are accepted.
+source "$(dirname "$0")/lib.sh"
+rm -rf "$WORK" && mkdir -p "$WORK" "$FOUNDRY_HOME"
+trap stop_daemon EXIT
+echo '{"questionWindowSeconds": 5}' > "$FOUNDRY_HOME/config.json"
+
+start_daemon
+install_plugins
+wait_for "any(e['kind']=='sdk_attached' for e in d['events'])" 60 "Foundry attached"
+fresh_repo
+fact project.create "{\"key\":\"SHT\",\"name\":\"Shout\",\"repo\":\"$WORK/repo\"}" >/dev/null
+
+log "create a feature from an idea"
+FID=$(fact feature.create '{"project":"SHT","idea":"Shout mode\nLet the CLI shout its input."}' | python3 -c "import json,sys;r=json.load(sys.stdin);assert 'error' not in r, r;print(r['id'])")
+feat() { echo "[f for f in d['features'] if f['id']==$FID][0]"; }
+docsha() { q "print([x['head_sha'] for x in d['docs'] if x['feature_id']==$FID and x['kind']=='$1'][0])"; }
+ok() { python3 -c "import json,sys;r=json.load(sys.stdin);assert 'error' not in r, r;print('$1')"; }
+
+log "the PM asks a Clarify question; the window passes; the answer starts a turn"
+wait_for "any(x['feature_id']==$FID and x['status']=='waiting' for x in d['questions'])" 120 "Clarify question waiting"
+fact feature.answer "{\"id\":$FID,\"answers\":{\"short_flag\":\"\"}}" | ok "answered (recommended)"
+wait_for "$(feat)['stage']=='spec'" 120 "spec ready for review"
+
+log "approve the spec at its SHA (a stale SHA is refused)"
+fact feature.approve_spec "{\"id\":$FID,\"sha\":\"0000000000000000000000000000000000000000\"}" \
+  | python3 -c "import json,sys;r=json.load(sys.stdin);assert r['error']['code']=='STALE_APPROVAL', r;print('STALE_APPROVAL')"
+fact feature.approve_spec "{\"id\":$FID,\"sha\":\"$(docsha spec)\"}" | ok "spec approved"
+wait_for "any(x['feature_id']==$FID and x['kind']=='plan' and x['status']=='in_review' for x in d['docs'])" 120 "plan ready"
+fact feature.approve_plan "{\"id\":$FID,\"sha\":\"$(docsha plan)\"}" | ok "plan approved"
+wait_for "any(x['feature_id']==$FID and x['kind']=='tasks' and x['status']=='in_review' for x in d['docs'])" 120 "task list ready"
+PROP=$(q "print([p['id'] for p in d['proposals'] if p['feature_id']==$FID and p['status']=='proposed'][0])")
+fact feature.approve_tasks "{\"id\":$FID,\"proposal\":$PROP,\"sha\":\"$(docsha tasks)\"}" | ok "task list approved"
+q "assert $(feat)['stage']=='build'; print('feature in Build')"
+
+st() { echo "[i['status'] for i in d['issues'] if i['key']=='$1'][0]"; }
+att() { echo "[a for a in d['attempts'] if a['issue_key']=='$1'][0]"; }
+accept() {
+  local args
+  args=$(q "a=$(att "$1"); import json; print(json.dumps({'key':'$1','head_sha':a['head_sha'],'tree_sha':a['tree_sha']}))")
+  fact issue.accept "$args" | python3 -c "import json,sys;r=json.load(sys.stdin);assert 'merged' in r, r;print('merged', r['merged'][:10])"
+}
+log "its tasks run through loop 2"
+wait_for "$(st SHT-1)=='In_Review'" 240 "SHT-1 In_Review"
+accept SHT-1
+wait_for "$(st SHT-2)=='Awaiting_Human'" 240 "SHT-2 asks"
+QID=$(q "print([x['id'] for x in d['questions'] if x['issue_key']=='SHT-2'][0])")
+fact question.answer "{\"id\":$QID,\"text\":\"yes, -s too\"}" >/dev/null
+wait_for "$(st SHT-2)=='In_Review'" 240 "SHT-2 In_Review"
+accept SHT-2
+
+log "the feature branch has the docs and both tasks, and no stray PM writes"
+B=foundry/feature/$(q "print($(feat)['slug'])")
+git -C "$WORK/repo" show "$B:.foundry/features/shout-mode/tasks.md" | grep -q "Written by Foundry"
+git -C "$WORK/repo" show "$B:shout/cli.py" | grep -q '"-s"'
+git -C "$WORK/repo" log --format=%an "$B" | grep -q "Foundry PM"
+log "loop1 passed"
