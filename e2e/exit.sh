@@ -121,7 +121,8 @@ PREP=$(fact feature.prepare_ship "{\"id\":$FID}")
 SHIP=$(echo "$PREP" | python3 -c "import json,sys;r=json.load(sys.stdin);assert 'error' not in r, r;print(json.dumps({'id':$FID,'head_sha':r['sha'],'tree_sha':r['tree'],'confirm':True}))")
 fact feature.accept_ship "$SHIP" | python3 -c "import json,sys;r=json.load(sys.stdin);assert 'merged' in r, r;print('shipped', r['merged'][:10])"
 q "assert $(feat)['stage']=='done'; print('feature Done')"
-grep -- '--loud' "$WORK/repo/shout/cli.py" >/dev/null && echo "main has --loud"
+grep -- '--loud' "$WORK/repo/shout/cli.py" >/dev/null
+echo "main has --loud"
 [ $REAL = 1 ] || grep '"-s"' "$WORK/repo/shout/cli.py" >/dev/null
 (cd "$WORK/repo" && python3 -m unittest discover -s tests >/dev/null 2>&1)
 echo "main's tests pass"
