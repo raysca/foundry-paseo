@@ -131,6 +131,24 @@ export function buildTools(f: Foundry): ToolSet {
     },
   });
 
+  const reportRequirements = defineAgentTool({
+    name: "report_requirements",
+    title: "Report requirements",
+    description:
+      "Verify only: report, once, whether the feature meets each requirement, with evidence (files, tests, behaviour you checked). Every requirement of the feature needs a result; refs must exist.",
+    input: z.object({
+      results: z.array(z.object({ requirement_ref: z.string(), passed: z.boolean(), evidence: z.string().min(1) })).min(1),
+    }),
+    async execute({ results }, { agent }) {
+      try {
+        guardRole(f, agent.id, "reviewer");
+        return ok(f.delivery.reportRequirements(agent.id, results));
+      } catch (e) {
+        return refusal(e);
+      }
+    },
+  });
+
   const none: AgentToolDefinition[] = [];
-  return { builder: [askHuman, verdict("builder")], reviewer: [verdict("reviewer")], planner: [askQuestions, proposeRequirements, proposeTasks], pm: none };
+  return { builder: [askHuman, verdict("builder")], reviewer: [verdict("reviewer"), reportRequirements], planner: [askQuestions, proposeRequirements, proposeTasks], pm: none };
 }
