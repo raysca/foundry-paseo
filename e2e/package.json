@@ -1,0 +1,7 @@
+{
+  "name": "foundry-e2e",
+  "private": true,
+  "description": "Foundry's e2e suite: a real Paseo daemon, the scripted harness and the Shout fixture",
+  "scripts": { "smoke": "bash smoke.sh" },
+  "dependencies": { "@getpaseo/cli": "0.18.0" }
+}
