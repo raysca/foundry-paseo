@@ -30,7 +30,7 @@ wait_for "$(st SHT-1)=='In_Review'" 240 "SHT-1 In_Review"
 q "import json
 for r in reversed(d['runs']):
   if r['kind']=='check': print('check', r['status'], json.loads(r['detail']).get('name'), json.loads(r['detail']).get('code'), repr((json.loads(r['detail']).get('tail') or '')[-160:]))"
-q "a=$(att SHT-1); assert a['outcome']=='passed' and a['fix_rounds']>=1, a; print('fix rounds', a['fix_rounds'])"
+q "a=$(att SHT-1); assert a['outcome']=='passed' and a['fix_rounds']==1, a; print('fix rounds', a['fix_rounds'])"
 
 log "stale accept is refused"
 fact issue.accept '{"key":"SHT-1","head_sha":"0000000000000000000000000000000000000000","tree_sha":"x"}' \

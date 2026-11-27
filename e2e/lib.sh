@@ -14,6 +14,9 @@ export FOUNDRY_SCRIPTED_LOG="$WORK/scripted.log"
 export FOUNDRY_DEV=1
 # Paseo reports script exit codes only under zsh (scorecard: upstream ask).
 export SHELL="$(command -v zsh)"
+# A clean zsh startup for the test daemon's terminals. On CI runners compinit stops at an
+# "insecure directories" prompt that eats the start of the first command Paseo types (exit 127).
+export ZDOTDIR="$WORK/zdotdir"
 PASEO_BIN="${PASEO_BIN:-$E2E/node_modules/.bin/paseo}"
 HARNESS="${HARNESS:-scripted}"   # scripted (CI) or claude (Mac)
 
@@ -64,6 +67,7 @@ PY
 }
 
 start_daemon() {
+  mkdir -p "$ZDOTDIR" && : > "$ZDOTDIR/.zshrc"
   write_daemon_config
   P daemon status >/dev/null 2>&1 && P daemon stop >/dev/null 2>&1 || true
   P start --timeout 300 >/dev/null
