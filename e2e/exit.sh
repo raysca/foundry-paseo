@@ -101,7 +101,9 @@ fi
 
 log "approve the changed spec; the PM proposes one change set"
 fact feature.approve_spec "{\"id\":$FID,\"sha\":\"$(docsha spec)\"}" | ok "changed spec approved"
-wait_for "any(p['feature_id']==$FID and p['status']=='proposed' and p['kind']=='change' for p in d['proposals'])" $((120*X)) "change set proposed"
+# The proposal row appears when the PM calls propose_tasks; it is approvable only once the turn has
+# ended and Foundry has written tasks.md for it (tasks_sha set, feature no longer planning_busy).
+wait_for "not $(feat)['planning_busy'] and any(p['feature_id']==$FID and p['status']=='proposed' and p['kind']=='change' and p['tasks_sha'] for p in d['proposals'])" $((120*X)) "change set proposed"
 PROP=$(q "print([p['id'] for p in d['proposals'] if p['feature_id']==$FID and p['status']=='proposed'][0])")
 fact feature.approve_tasks "{\"id\":$FID,\"proposal\":$PROP,\"sha\":\"$(docsha tasks)\"}" | ok "change set approved"
 q "f=$(feat); assert f['spec_change_open']==0 and f['stage']=='build', f; print('change set applied')"
