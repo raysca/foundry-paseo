@@ -5,8 +5,9 @@
 # R3); SHT-2 resumes and SHT-3 runs; Verify, ship with the gap, local merge into main, Done.
 #
 # HARNESS=claude runs it on a Mac with real Claude Code. A real agent doesn't follow the scripted moves
-# (whether it asks, what it names things, whether the builder asks a question), so that run keeps the same
-# steps with looser checks and longer waits; the scripted run asserts each move exactly.
+# (whether it asks, how many tasks it plans, what it names things), so that run edits the spec while the
+# first task is in flight, finds the added requirement by diff, accepts whatever reaches review and checks
+# outcomes, with longer waits; the scripted run asserts each move exactly.
 source "$(dirname "$0")/lib.sh"
 REAL=0; X=1
 [ "$HARNESS" = "scripted" ] || { REAL=1; X=5; }
@@ -55,14 +56,20 @@ accept() {
   args=$(q "a=$(att "$1"); import json; print(json.dumps({'key':'$1','head_sha':a['head_sha'],'tree_sha':a['tree_sha']}))")
   fact issue.accept "$args" | python3 -c "import json,sys;r=json.load(sys.stdin);assert 'merged' in r, r;print('merged', r['merged'][:10])"
 }
-log "SHT-1 runs and is accepted; SHT-2 starts and asks"
-wait_for "$(st SHT-1)=='In_Review'" $((240*X)) "SHT-1 In_Review"
-accept SHT-1
 if [ $REAL = 1 ]; then
-  wait_for "$(st SHT-2) in ('In_Progress','Awaiting_Human','In_Review')" 600 "SHT-2 started"
+  # A real PM may plan a single task, which would end Build at its accept, so the spec is edited while
+  # the first task is still in flight.
+  log "SHT-1 starts"
+  wait_for "$(st SHT-1) in ('In_Progress','Awaiting_Human','In_Review')" 600 "SHT-1 started"
 else
+  log "SHT-1 runs and is accepted; SHT-2 starts and asks"
+  wait_for "$(st SHT-1)=='In_Review'" 240 "SHT-1 In_Review"
+  accept SHT-1
   wait_for "$(st SHT-2)=='Awaiting_Human'" 240 "SHT-2 asks"
 fi
+# The requirement the edit adds is the one ref that wasn't there before (R3 with the scripted PM).
+BEFORE=$(q "print(' '.join(r['ref'] for r in d['requirements'] if r['feature_id']==$FID))")
+newref() { echo "[r['ref'] for r in d['requirements'] if r['feature_id']==$FID and r['ref'] not in '$BEFORE'.split()]"; }
 
 log "edit the spec during Build: a new requirement"
 SPEC=$(fact feature.doc "{\"id\":$FID,\"kind\":\"spec\"}")
@@ -73,18 +80,21 @@ text=d['text'].replace('## Out of scope', 'Also: --loud is an alias of --shout.\
 print(json.dumps({'id':$FID,'kind':'spec','text':text,'base_sha':d['sha']}))")
 fact feature.edit_doc "$EDIT" | ok "spec edited"
 q "f=$(feat); assert f['spec_change_open']==1, f; print('spec change open')"
-wait_for "any(r['feature_id']==$FID and r['ref']=='R3' for r in d['requirements']) and any(x['feature_id']==$FID and x['kind']=='spec' and x['status']=='in_review' for x in d['docs'])" $((120*X)) "PM restated the requirements (R3 added)"
-git -C "$WORK/repo" show "foundry/feature/shout-mode:.foundry/features/shout-mode/spec.md" | grep "### R3 " >/dev/null
+wait_for "len($(newref))==1 and any(x['feature_id']==$FID and x['kind']=='spec' and x['status']=='in_review' for x in d['docs'])" $((120*X)) "PM restated the requirements (one added)"
+NEW=$(q "print($(newref)[0])")
+[ $REAL = 1 ] || [ "$NEW" = "R3" ]
+log "added $NEW"
+git -C "$WORK/repo" show "foundry/feature/shout-mode:.foundry/features/shout-mode/spec.md" | grep "### $NEW " >/dev/null
 
 log "approve the changed spec; the PM proposes one change set"
 fact feature.approve_spec "{\"id\":$FID,\"sha\":\"$(docsha spec)\"}" | ok "changed spec approved"
 wait_for "any(p['feature_id']==$FID and p['status']=='proposed' and p['kind']=='change' for p in d['proposals'])" $((120*X)) "change set proposed"
 PROP=$(q "print([p['id'] for p in d['proposals'] if p['feature_id']==$FID and p['status']=='proposed'][0])")
 fact feature.approve_tasks "{\"id\":$FID,\"proposal\":$PROP,\"sha\":\"$(docsha tasks)\"}" | ok "change set approved"
-q "f=$(feat); assert f['spec_change_open']==0 and f['stage']=='build', f; i=[i for i in d['issues'] if i['feature_id']==$FID and '\"R3\"' in i['requirement_refs']]; assert i, 'nothing covers R3'; print(i[0]['key'], 'covers R3')"
+q "f=$(feat); assert f['spec_change_open']==0 and f['stage']=='build', f; i=[i for i in d['issues'] if i['feature_id']==$FID and '\"$NEW\"' in i['requirement_refs']]; assert i, 'nothing covers $NEW'; print(i[0]['key'], 'covers $NEW')"
 
-log "SHT-2 resumes with the answer; SHT-3 runs after it"
 if [ $REAL = 1 ]; then
+  log "every task runs and is accepted (questions get 'use your recommendation')"
   # Answer any question, accept whatever reaches review, until every task of the feature is Done.
   left() { q "print(sum(1 for i in d['issues'] if i['feature_id']==$FID and i['status'] not in ('Done','Cancelled')))"; }
   for _ in $(seq 1 360); do
@@ -97,6 +107,7 @@ if [ $REAL = 1 ]; then
   done
   [ "$(left)" = "0" ] || { log "TIMEOUT: tasks still open"; exit 1; }
 else
+  log "SHT-2 resumes with the answer; SHT-3 runs after it"
   QID=$(q "print([x['id'] for x in d['questions'] if x['issue_key']=='SHT-2'][0])")
   fact question.answer "{\"id\":$QID,\"text\":\"yes, -s too\"}" >/dev/null
   wait_for "$(st SHT-2)=='In_Review'" 240 "SHT-2 In_Review"
