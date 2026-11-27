@@ -83,7 +83,7 @@ export default function contribute(server: PluginServerContext) {
       setup: foundry.setupStatus(),
       projects: store.projects(),
       overview: featuresOverview(store),
-      features: store.features(),
+      features: store.features().map((f) => ({ ...f, planning_busy: foundry.planning.isBusy(f.id) })),
       issues: store.issues(),
       attempts: store.all("SELECT * FROM attempts ORDER BY id DESC LIMIT 200"),
       runs: store.all("SELECT * FROM runs ORDER BY id DESC LIMIT 200"),
