@@ -1,7 +1,7 @@
 // Foundry's runtime: owns the store and the host, and answers host events. Loop 1, loop 2 and the PM
 // plug in here as they land; the foundations only record what happens and run the setup check.
 import { ensureIntegration } from "./features";
-import type { Host } from "./host";
+import type { Host, ProfileChoice } from "./host";
 import { Locks } from "./locks";
 import { FoundryError, type Actor } from "./model";
 import { checkSetup, setupReady, type Finding } from "./setup";
@@ -112,17 +112,68 @@ export class Foundry {
     this.store.event("setup_checked", { detail: { ready: setupReady(findings), errors: findings.filter((f) => f.level === "error").map((f) => f.code) } });
     return this.lastSetup;
   }
-  /** Onboarding: adds whichever foundry-* profiles (and the foundry-<harness> provider) are missing in
-   *  Paseo's settings. Existing profiles are never changed; models can be edited in Paseo afterwards. */
-  async createProfiles(o: { harness?: string; workModel?: string; pmModel?: string } = {}) {
-    const added = await this.host.addMissingProfiles({
-      harness: o.harness ?? "claude",
-      workModel: o.workModel ?? "claude-sonnet-5-5",
-      pmModel: o.pmModel ?? "claude-opus-5-5",
+  /** Onboarding: the harnesses and models the host offers, for the profile step. */
+  harnesses() {
+    return this.host.harnesses();
+  }
+
+  /** Onboarding: adds the foundry-* profiles you chose a harness and model for, and the provider each
+   *  harness runs on, only where missing. Existing profiles are never changed; what Foundry created is
+   *  recorded so uninstall can tell it apart from yours. */
+  async createProfiles(choices: ProfileChoice[]) {
+    const roles = new Set(["builder", "reviewer", "planner", "pm"]);
+    for (const c of choices)
+      if (!roles.has(c.role) || !c.harness || !c.model)
+        throw new FoundryError("PROFILE_CHOICE_INVALID", `Each profile needs a role, a harness and a model (got ${JSON.stringify(c)}).`);
+    const { added, created } = await this.host.writeProfiles(choices);
+    this.store.tx(() => {
+      for (const c of created) this.store.addOwned(c.kind, c.id, c.value);
     });
     this.store.event("profiles_created", { actor: "you", detail: { added } });
     return { added, setup: await this.runSetupCheck() };
   }
+
+  /** Paseo workspaces Foundry made, from everything it recorded. */
+  foundryWorkspaces(): string[] {
+    const ids = new Set<string>();
+    const add = (rows: { id: string | null }[]) => rows.forEach((r) => r.id && ids.add(r.id));
+    add(this.store.all("SELECT integration_workspace_id id FROM features"));
+    add(this.store.all("SELECT workspace_id id FROM attempts UNION SELECT check_workspace_id FROM attempts"));
+    add(this.store.all("SELECT workspace_id id FROM agents"));
+    add(this.store.all("SELECT workspace_id id FROM verifications"));
+    for (const r of this.store.all<{ value: string }>("SELECT value FROM settings WHERE key LIKE 'pm_ws:%'")) {
+      try {
+        add([{ id: JSON.parse(r.value)?.workspaceId ?? null }]);
+      } catch {}
+    }
+    return [...ids];
+  }
+
+  /** Development only: what a reset would remove. */
+  async devResetPlan() {
+    const facts = await this.host.facts();
+    return {
+      workspaces: this.foundryWorkspaces(),
+      profiles: (facts.profiles ?? []).map((p) => p.id).filter((id) => id.startsWith("foundry-")),
+      data: this.cfg.home,
+    };
+  }
+
+  /** Development only: back to a fresh install. Archives Foundry's workspaces, removes every foundry-*
+   *  profile, copies the database to `backupPath` and empties it, then reloads the plugin. */
+  async devReset(backupPath: string) {
+    const plan = await this.devResetPlan();
+    this.stop();
+    const archived: string[] = [];
+    for (const id of plan.workspaces) {
+      await this.host.archiveWorkspace(id).then(() => archived.push(id)).catch(() => {});
+    }
+    const removed = await this.host.removeProfiles(plan.profiles);
+    this.store.wipe(backupPath);
+    this.lastSetup = null;
+    return { archived, removed, backup: backupPath };
+  }
+
   setupStatus() {
     return this.lastSetup;
   }

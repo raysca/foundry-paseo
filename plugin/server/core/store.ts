@@ -369,6 +369,11 @@ export const MIGRATIONS: readonly string[] = [
    ALTER TABLE cards ADD COLUMN thread TEXT NOT NULL DEFAULT 'main';
    ALTER TABLE cards ADD COLUMN decided_by TEXT;
    CREATE INDEX chat_thread ON chat(project_id, thread, id);`,
+  // 7: onboarding (install record, acknowledgements) and the entries Foundry added to Paseo's config
+  `CREATE TABLE onboarding (key TEXT PRIMARY KEY, value TEXT NOT NULL, at TEXT NOT NULL DEFAULT (datetime('now')));
+   CREATE TABLE paseo_owned (
+     kind TEXT NOT NULL, id TEXT NOT NULL, value TEXT NOT NULL,
+     at TEXT NOT NULL DEFAULT (datetime('now')), PRIMARY KEY(kind, id));`,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
@@ -449,6 +454,45 @@ export class Store {
         throw new FoundryError("MIGRATION_FAILED", `Upgrading ${this.path} from schema ${from} to ${from + 1} failed and was rolled back; the database is unchanged at schema ${from}. ${String((e as Error)?.message ?? e)}`);
       }
       v = from + 1;
+    }
+  }
+
+  // ---------- onboarding ----------
+  onboarding(key: string): { value: string; at: string } | undefined {
+    return this.get<{ value: string; at: string }>("SELECT value, at FROM onboarding WHERE key=?", key);
+  }
+  onboardingAll(): { key: string; value: string; at: string }[] {
+    return this.all("SELECT key, value, at FROM onboarding ORDER BY key");
+  }
+  setOnboarding(key: string, value: string) {
+    this.run("INSERT INTO onboarding(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, at=datetime('now')", key, value);
+  }
+  /** Paseo config entries Foundry created (kind "profile" or "provider"), with the value as written. */
+  owned(): { kind: string; id: string; value: string; at: string }[] {
+    return this.all("SELECT kind, id, value, at FROM paseo_owned ORDER BY kind, id");
+  }
+  addOwned(kind: string, id: string, value: unknown) {
+    this.run("INSERT INTO paseo_owned(kind,id,value) VALUES(?,?,?) ON CONFLICT(kind,id) DO UPDATE SET value=excluded.value, at=datetime('now')", kind, id, json(value));
+  }
+  removeOwned(kind: string, id: string) {
+    this.run("DELETE FROM paseo_owned WHERE kind=? AND id=?", kind, id);
+  }
+
+  /**
+   * Development only: copy the database to `backupPath`, then empty every table so Foundry starts as a
+   * fresh install. The schema and the app marker stay, so nothing is migrated again.
+   */
+  wipe(backupPath: string) {
+    if (this.path !== ":memory:") this.db.exec(`VACUUM INTO '${backupPath.replace(/'/g, "''")}'`);
+    const tables = (this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name<>'meta'").all() as { name: string }[]).map((t) => t.name);
+    this.db.exec("PRAGMA foreign_keys=OFF");
+    try {
+      this.tx(() => {
+        for (const t of tables) this.db.exec(`DELETE FROM "${t}"`);
+        if (this.db.prepare("SELECT 1 FROM sqlite_master WHERE name='sqlite_sequence'").get()) this.db.exec("DELETE FROM sqlite_sequence");
+      });
+    } finally {
+      this.db.exec("PRAGMA foreign_keys=ON");
     }
   }
 

@@ -1,7 +1,7 @@
 // Foundry's server entry: wires the store, the Paseo adapter, settings, hooks and plugin RPC.
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, readdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import type { PluginServerContext, PluginHandlerContext } from "@getpaseo/plugin/server";
 import { Store } from "./server/core/store";
@@ -12,6 +12,8 @@ import { FoundryError } from "./server/core/model";
 import { PaseoAdapter, type AdapterConfig } from "./server/adapter/paseo";
 import { buildTools } from "./server/adapter/tools";
 import { actionRpc, bootstrapRpc, setupRpc, stateRpc } from "./shared/rpc";
+import { Install } from "./server/core/install";
+import { CHANGES, VERSION } from "./shared/changes";
 import { foundrySettings, type FoundrySettings } from "./shared/settings";
 
 type PaseoApi = PluginHandlerContext["paseo"];
@@ -20,7 +22,19 @@ const PLUGIN_ID = "foundry";
 export default function contribute(server: PluginServerContext) {
   // Not ~/.foundry: the earlier Go Foundry and the prototype kept their own databases there.
   const home = process.env.FOUNDRY_HOME ?? join(homedir(), ".foundry-paseo");
-  const store = new Store(join(home, "foundry.db"));
+  let store: Store;
+  try {
+    store = new Store(join(home, "foundry.db"));
+  } catch (e) {
+    // The database couldn't be opened or upgraded. It is left exactly as it was; Foundry starts in safe
+    // mode so the screens can say what happened instead of the plugin failing to load.
+    if (e instanceof FoundryError) return safeMode(server, home, e);
+    throw e;
+  }
+  const install = new Install(store, VERSION, CHANGES);
+  install.onStart();
+  // Development helpers (dev reset): with FOUNDRY_DEV=1, or a dev-mode file that scripts/install-local.sh writes.
+  const devMode = process.env.FOUNDRY_DEV === "1" || existsSync(join(home, "dev-mode"));
 
   // Effective settings: Paseo plugin settings, then an optional overlay file (the e2e kit writes one).
   const settings: FoundrySettings = foundrySettings.schema.parse({}) as FoundrySettings;
@@ -99,20 +113,50 @@ export default function contribute(server: PluginServerContext) {
       pm_threads: store.all("SELECT project_id, thread, busy, last_turn_at FROM pm_threads"),
       ships: store.all("SELECT key, value FROM settings WHERE key LIKE 'ship:%' AND value<>''"),
       events: store.events({ limit: 200 }),
+      onboarding: install.status(),
+      dev: devMode,
+      safe_mode: null,
     })),
   );
   handle(
     actionRpc,
     withSdk(async ({ action, args }: { action: string; args: Record<string, any> }) => {
+      install.requireGates(action);
       switch (action) {
         case "project.create":
           return store.createProject({ key: String(args.key), name: String(args.name ?? args.key), repo: String(args.repo), baseRef: String(args.baseRef ?? "main") });
-        case "project.adopt":
-          return adoptRepo(store, { repo: String(args.repo ?? ""), name: args.name ? String(args.name) : undefined });
+        case "project.adopt": {
+          // The first time a repo is used, the screen shows what Foundry will do there; adopting confirms it.
+          if (args.acknowledged !== true)
+            throw new FoundryError("ACK_REQUIRED", "Confirm what Foundry will do in this repo first.", { notice: "project" });
+          const p = await adoptRepo(store, { repo: String(args.repo ?? ""), name: args.name ? String(args.name) : undefined });
+          if (p.created) install.ackProject(p.id);
+          return p;
+        }
+        case "onboarding.dismiss_welcome":
+          return install.dismissWelcome();
+        case "onboarding.ack_whats_new":
+          return install.ackWhatsNew();
+        case "onboarding.ack_gate":
+          return install.ackGate(String(args.id ?? ""));
         case "setup.check":
           return foundry.runSetupCheck();
+        case "setup.harnesses":
+          return foundry.harnesses();
         case "setup.create_profiles":
-          return foundry.createProfiles();
+          return foundry.createProfiles(Array.isArray(args.choices) ? args.choices : []);
+        case "dev.reset_plan":
+          if (!devMode) throw new FoundryError("UNKNOWN_ACTION", `Unknown action ${action}`);
+          return foundry.devResetPlan();
+        case "dev.reset": {
+          if (!devMode) throw new FoundryError("UNKNOWN_ACTION", `Unknown action ${action}`);
+          if (args.confirm !== "reset") throw new FoundryError("CONFIRM_REQUIRED", 'Pass {"confirm":"reset"} to wipe Foundry back to a fresh install.');
+          const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\..*/, "");
+          const r = await foundry.devReset(join(tmpdir(), `foundry-reset-${stamp}.db`));
+          // Reload so every part of Foundry starts again from the empty database, as on a first install.
+          setTimeout(() => void adapter.reloadSelf().catch(() => {}), 300);
+          return r;
+        }
         case "issue.start":
           return foundry.startIssue(String(args.key));
         case "issue.accept":
@@ -248,4 +292,20 @@ async function seedFeature(foundry: Foundry, a: SeedArgs) {
     return keys;
   });
   return { feature: store.feature(f.id), issues: keys };
+}
+
+/** Foundry couldn't open its database. Nothing was changed; the screens show why and how to recover. */
+function safeMode(server: PluginServerContext, home: string, e: FoundryError) {
+  let backups: string[] = [];
+  try {
+    backups = readdirSync(home).filter((f) => f.startsWith("foundry.db.backup-")).sort().reverse();
+  } catch {}
+  const info = { code: e.code, message: e.message, home, backup: backups[0] ? join(home, backups[0]) : null };
+  const refuse = { error: { code: "STORE_SAFE_MODE", message: `Foundry is in safe mode: ${e.message}`, detail: info } };
+  const handle = server.handle.bind(server) as (c: unknown, h: (i: any, ctx: PluginHandlerContext) => unknown) => void;
+  handle(bootstrapRpc, () => ({ ok: true }));
+  handle(setupRpc, () => ({ at: new Date().toISOString(), findings: [{ level: "error", code: "STORE_SAFE_MODE", message: e.message }] }));
+  handle(stateRpc, () => ({ safe_mode: info, projects: [], features: [], issues: [], overview: { buckets: {}, rows: [] } }));
+  handle(actionRpc, () => refuse);
+  return () => {};
 }

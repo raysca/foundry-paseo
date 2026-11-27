@@ -5,7 +5,7 @@ import { SettingsAction, SettingsInput, SettingsSection } from "@getpaseo/plugin
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { Text, View } from "react-native";
-import { actionRpc, setupRpc } from "../shared/rpc";
+import { actionRpc, setupRpc, stateRpc } from "../shared/rpc";
 import { foundrySettings } from "../shared/settings";
 
 type Finding = { level: "ok" | "info" | "warn" | "error"; code: string; message: string; fix?: string };
@@ -14,7 +14,9 @@ const MARK: Record<Finding["level"], string> = { ok: "OK", info: "Note", warn: "
 export function FoundrySettingsScreen(_: PluginSurfaceProps) {
   const setup = useRpc(setupRpc);
   const action = useRpc(actionRpc);
-  const [creating, setCreating] = useState<string | null>(null);
+  const state = useRpc(stateRpc);
+  const dev = useQuery({ queryKey: ["foundry-dev"], queryFn: async () => Boolean(((await state({})) as any)?.dev) });
+  const [reset, setReset] = useState<"idle" | "confirm" | "running" | string>("idle");
   const qc = useQueryClient();
   const check = useQuery({ queryKey: ["foundry-setup"], queryFn: () => setup({}) as Promise<{ findings: Finding[] }> });
   const st = useSettings(foundrySettings);
@@ -32,18 +34,7 @@ export function FoundrySettingsScreen(_: PluginSurfaceProps) {
           </View>
         ))}
         {findings.some((f) => f.code === "PROFILE_MISSING") ? (
-          <SettingsAction
-            label={creating ?? "Adds only the missing foundry-* profiles and the foundry-claude provider. Existing profiles are never changed."}
-            actionLabel="Create Foundry's profiles"
-            disabled={creating === "Creating…"}
-            onPress={() => {
-              setCreating("Creating…");
-              void (action({ action: "setup.create_profiles", args: {} }) as Promise<any>)
-                .then((r) => setCreating(r?.error ? `${r.error.code}: ${r.error.message}` : `Added: ${(r?.added ?? []).join(", ") || "nothing"}`))
-                .catch((e) => setCreating(String(e?.message ?? e)))
-                .finally(() => void qc.invalidateQueries({ queryKey: ["foundry-setup"] }));
-            }}
-          />
+          <Text style={{ paddingVertical: 6 }}>Missing profiles are set up in the welcome guide on Foundry's home screen (Foundry in the sidebar).</Text>
         ) : null}
         <SettingsAction
           label={check.isFetching ? "Checking" : "Roles come from Paseo agent profiles named foundry-builder, foundry-reviewer, foundry-planner and foundry-pm"}
@@ -51,6 +42,30 @@ export function FoundrySettingsScreen(_: PluginSurfaceProps) {
           onPress={() => void qc.invalidateQueries({ queryKey: ["foundry-setup"] })}
         />
       </SettingsSection>
+      {dev.data ? (
+        <SettingsSection title="Development">
+          <SettingsAction
+            label={
+              reset === "idle"
+                ? "Reset Foundry to a fresh install: archive its workspaces, remove the foundry-* profiles, back up and empty its data, reload."
+                : reset === "confirm"
+                  ? "Press again to reset. The data is copied to /tmp first."
+                  : reset === "running"
+                    ? "Resetting…"
+                    : reset
+            }
+            actionLabel={reset === "confirm" ? "Really reset" : "Reset Foundry"}
+            disabled={reset === "running"}
+            onPress={() => {
+              if (reset !== "confirm") return setReset("confirm");
+              setReset("running");
+              void (action({ action: "dev.reset", args: { confirm: "reset" } }) as Promise<any>)
+                .then((r) => setReset(r?.error ? `${r.error.code}: ${r.error.message}` : `Reset. Backup: ${r.backup}. Foundry is reloading.`))
+                .catch((e) => setReset(String(e?.message ?? e)));
+            }}
+          />
+        </SettingsSection>
+      ) : null}
       {st.status === "ready" ? (
         <SettingsSection title="Task loop">
           <SettingsInput

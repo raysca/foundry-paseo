@@ -41,13 +41,20 @@ const log = (...a) => console.log(`[${new Date().toISOString().slice(11, 19)}]`,
     await skip.waitFor({ timeout: 8000 }).then(() => skip.click(), () => {});
     await p.waitForTimeout(500);
     await p.getByText("Foundry", { exact: true }).first().click();
-    await see("Your Paseo projects");
+    // A fresh install opens on the welcome guide. The e2e daemon already has Foundry's profiles, so
+    // step 1 is done and step 2 lists the Paseo projects.
+    await see("Welcome to Foundry");
+    await see("Foundry's agent profiles are set up");
     await see("Not used with Foundry yet");
-    await shot("projects");
+    await shot("welcome");
   });
 
   await step("start using the Paseo project with Foundry from its card", async () => {
     await p.getByText("Not used with Foundry yet", { exact: false }).locator("visible=true").first().click();
+    // The first time a repo is used, Foundry says what it will do there and waits for a yes.
+    await see("never merges into your base branch without your OK");
+    await shot("project-notice");
+    await press("Start using Foundry here");
     await see("New feature");
     await see("base main");
     await shot("home");

@@ -51,6 +51,11 @@ INSTALLED="$(P plugin ls --json 2>/dev/null | node -e '
     } catch { process.stdout.write(""); }
   });')"
 
+# Mark this as a development install: it turns on Foundry's dev helpers (scripts/dev-reset.sh, and the
+# reset button in Settings). Only adds a file; the data folder is otherwise left as it is.
+DATA="${FOUNDRY_HOME:-$HOME/.foundry-paseo}"
+mkdir -p "$DATA" && touch "$DATA/dev-mode"
+
 if [ -z "$INSTALLED" ]; then
   say "Installing Foundry into Paseo"
   P plugin install "$PLUGIN"
@@ -78,6 +83,6 @@ case "$ROW" in
 esac
 
 say "Done."
-echo "In Paseo: Foundry is in the sidebar. Settings → Foundry runs the setup check (role profiles"
-echo "foundry-builder, foundry-reviewer, foundry-pm and optionally foundry-planner; a zsh daemon shell)."
+echo "In Paseo: open Foundry in the sidebar. On a first install a welcome guide sets up its agents."
 echo "After pulling new code, run this script again; it reloads Foundry without losing its data."
+echo "To test onboarding from scratch: scripts/dev-reset.sh (see its header)."
