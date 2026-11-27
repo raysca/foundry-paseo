@@ -67,7 +67,7 @@ PY
 }
 
 start_daemon() {
-  mkdir -p "$ZDOTDIR" && : > "$ZDOTDIR/.zshrc"
+  mkdir -p "$ZDOTDIR" && : > "$ZDOTDIR/.zshrc" && echo 'skip_global_compinit=1' > "$ZDOTDIR/.zshenv"
   write_daemon_config
   P daemon status >/dev/null 2>&1 && P daemon stop >/dev/null 2>&1 || true
   P start --timeout 300 >/dev/null

@@ -34,6 +34,10 @@ jobs:
           node-version: 22
       - name: zsh (Paseo reports script exit codes only under zsh)
         run: sudo apt-get update && sudo apt-get install -y zsh
+      - name: quiet zsh startup (compinit's insecure-directories prompt eats the first command Paseo types)
+        run: |
+          echo 'skip_global_compinit=1' >> ~/.zshenv
+          zsh -c 'autoload -Uz compaudit; compaudit' 2>/dev/null | xargs -r sudo chmod g-w,o-w
       - run: npm ci
         working-directory: plugin
       - run: npm ci
