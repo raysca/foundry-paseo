@@ -1,7 +1,7 @@
 #!/bin/bash
 # Loop 1 into loop 2 on a real daemon: a feature from an idea through a Clarify round answered late,
 # spec, plan and task list approved at their SHAs, its two tasks run and are accepted, then Verify
-# fails a flaky check, passes when run again, and the feature ships into main by local merge.
+# fails a check in its fresh workspace, you ship with the gap, and the feature merges into main locally.
 source "$(dirname "$0")/lib.sh"
 rm -rf "$WORK" && mkdir -p "$WORK" "$FOUNDRY_HOME"
 trap stop_daemon EXIT
@@ -57,14 +57,14 @@ git -C "$WORK/repo" show "$B:.foundry/features/shout-mode/tasks.md" | grep "Writ
 git -C "$WORK/repo" show "$B:shout/cli.py" | grep '"-s"' >/dev/null
 git -C "$WORK/repo" log --format=%an "$B" | grep "Foundry PM" >/dev/null
 verif() { echo "[v for v in d['verifications'] if v['feature_id']==$FID][0]"; }
-log "Build ends: Verify runs on the merged head; fail_once fails its first run there (no fix rounds in Verify)"
+log "Build ends: Verify checks the merged head in a fresh workspace; fail_once fails its first run there (no fix rounds in Verify)"
 wait_for "$(verif)['status']=='failed'" 300 "Verify failed"
-q "v=$(verif); assert v['failure']=='CHECKS_FAILED', v; print('CHECKS_FAILED')"
+q "v=$(verif); assert v['failure']=='CHECKS_FAILED', v; import json; print('CHECKS_FAILED', [(c['name'],c['status']) for c in json.loads(v['checks'])])"
 q "r=[r for r in d['overview']['rows'] if r['id']==$FID][0]; assert r['delivery_label']=='Verify: 1 check failed', r; print(r['delivery_label'])"
-log "run Verify again: it passes and the feature moves to Ship"
-fact feature.verify "{\"id\":$FID}" | ok "Verify started"
-wait_for "$(feat)['stage']=='ship'" 300 "verified, in Ship"
-q "v=[v for v in d['verifications'] if v['feature_id']==$FID][0]; import json; print('checks', [(c['name'],c['status']) for c in json.loads(v['checks'])]); assert v['status']=='passed', v"
+q "import json; v=$(verif); assert len(json.loads(v['requirements']))==2, v; print('reviewer reported 2 requirements')"
+log "ship with the gap"
+fact feature.ship_with_gaps "{\"id\":$FID}" | python3 -c "import json,sys;r=json.load(sys.stdin);assert r.get('gaps')==['check fail_once'], r;print('gaps', r['gaps'])"
+q "assert $(feat)['stage']=='ship'; print('feature in Ship')"
 
 log "prepare and accept the ship; main is checked out in the developer's checkout, so it needs confirming"
 PREP=$(fact feature.prepare_ship "{\"id\":$FID}")

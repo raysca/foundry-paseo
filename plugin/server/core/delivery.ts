@@ -113,8 +113,16 @@ export class Delivery {
     const f = this.store.feature(featureId)!;
     const p = this.store.project(f.project_id)!;
     try {
-      // In the feature's integration worktree, where Paseo ran the project's setup when it made it.
-      const ws = { workspaceId: f.integration_workspace_id!, path: f.integration_path! };
+      // A fresh hidden workspace at the merged head, so Paseo runs the project's setup on the merged code
+      // (Paseo has no call to re-run setup in the integration worktree: upstream ask).
+      const ws = await this.host.createWorktreeWorkspace({
+        repo: p.repo,
+        title: `${f.title} verify`,
+        branch: `foundry/verify/${f.slug}/${r.verification}-${randomUUID().slice(0, 4)}`,
+        from: r.sha,
+        purpose: "verify",
+        visible: false,
+      });
       this.store.run("UPDATE verifications SET workspace_id=?, path=? WHERE id=?", ws.workspaceId, ws.path, r.verification);
       const union: TaskChecks = { scripts: [], paths: [] };
       for (const i of this.store.issues({ featureId: f.id }).filter((x) => x.status !== "Cancelled")) {
@@ -218,6 +226,7 @@ export class Delivery {
     const v = this.store.get<Verification>("SELECT * FROM verifications WHERE id=?", id)!;
     if (v.status !== "running") return;
     const f = this.store.feature(v.feature_id)!;
+    if (v.workspace_id) void this.host.archiveWorkspace(v.workspace_id).catch(() => {});
     this.store.tx(() => {
       this.store.run("UPDATE verifications SET status=?, failure=?, ended_at=datetime('now') WHERE id=?", failure ? "failed" : "passed", failure, id);
       if (!failure) this.store.setStage(f.id, "ship");
@@ -342,7 +351,7 @@ export class Delivery {
   }
 }
 
-/** Undo anything a check or the reviewer left in the integration worktree: tracked changes, commits and
+/** Undo anything a check or the reviewer left in the verify worktree: tracked changes, commits and
  * untracked files that aren't ignored. Ignored files (build caches, setup output) stay, as in your checkout. */
 async function cleanTo(path: string, sha: string) {
   await git(path, "reset", "-q", "--hard", sha);
