@@ -10,9 +10,11 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PLUGIN="$ROOT/plugin"
 PASEO_BIN="${PASEO_BIN:-paseo}"
-HOME_ARGS=()
-[ -n "${PASEO_HOME:-}" ] && HOME_ARGS=(--home "$PASEO_HOME")
-P() { "$PASEO_BIN" "${HOME_ARGS[@]}" "$@"; }
+# No arrays: macOS ships bash 3.2, where an empty "${a[@]}" under set -u kills the script silently.
+P() {
+  if [ -n "${PASEO_HOME:-}" ]; then "$PASEO_BIN" --home "$PASEO_HOME" "$@"; else "$PASEO_BIN" "$@"; fi
+}
+trap 'rc=$?; [ $rc -eq 0 ] || printf "install-local: stopped with exit code %s at line %s\n" "$rc" "$LINENO" >&2' EXIT
 say() { printf '\033[1m%s\033[0m\n' "$*"; }
 die() { printf 'install-local: %s\n' "$*" >&2; exit 1; }
 
