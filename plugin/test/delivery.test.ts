@@ -108,9 +108,13 @@ test("Build ends, Verify passes on the merged head and the feature ships by loca
   assert.ok(existsSync(join(f.integration_path!, "NOTES.md")));
   assert.deepEqual(parse<{ name: string; status: string }[]>(v.checks, []).map((c) => [c.name, c.status]), [["test", "passed"]]);
   assert.equal(parse<RequirementResult[]>(v.requirements, []).length, 2);
-  // Checks and the reviewer ran in the integration worktree; the reviewer's edits were undone.
-  assert.equal(v.path, f.integration_path);
+  // Checks and the reviewer ran in a fresh verify workspace at the merged head, archived after; the
+  // reviewer's edits were undone and the integration worktree was never touched.
+  assert.notEqual(v.path, f.integration_path);
+  assert.equal(host.workspaces.get(v.workspace_id!)!.purpose, "verify");
+  assert.ok(host.archived.includes(v.workspace_id!));
   assert.equal(run(v.path!, "git", "status", "--porcelain"), "");
+  assert.equal(run(f.integration_path!, "git", "status", "--porcelain"), "");
   assert.ok(host.notifications.some((n) => n.key === `verify:${fid}` && /ready to ship/.test(n.title)));
   assert.equal(featuresOverview(store).rows[0]!.delivery_label, "Ready to ship");
 

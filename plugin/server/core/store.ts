@@ -701,6 +701,7 @@ export class Store {
     const rows = [
       ...this.all<{ p: string | null }>("SELECT integration_path p FROM features"),
       ...this.all<{ p: string | null }>("SELECT check_path p FROM attempts WHERE ended_at IS NULL"),
+      ...this.all<{ p: string | null }>("SELECT path p FROM verifications WHERE status='running'"),
     ];
     return rows.map((r) => r.p).filter((p): p is string => !!p);
   }
