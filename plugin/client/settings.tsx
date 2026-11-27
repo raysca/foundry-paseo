@@ -7,6 +7,7 @@ import { useState } from "react";
 import { Text, View } from "react-native";
 import { actionRpc, setupRpc, stateRpc } from "../shared/rpc";
 import { foundrySettings } from "../shared/settings";
+import { BeforeUninstall } from "./uninstall";
 
 type Finding = { level: "ok" | "info" | "warn" | "error"; code: string; message: string; fix?: string };
 const MARK: Record<Finding["level"], string> = { ok: "OK", info: "Note", warn: "Check", error: "Fix" };
@@ -86,6 +87,7 @@ export function FoundrySettingsScreen(_: PluginSurfaceProps) {
           />
         </SettingsSection>
       ) : null}
+      <BeforeUninstall />
     </View>
   );
 }

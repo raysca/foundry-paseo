@@ -863,8 +863,13 @@ export class Store {
     this.run(`UPDATE ${table} SET ${keys.map((k) => `${k}=?`).join(",")} WHERE ${idCol}=?`, ...vals, id);
   }
 
+  /** A consistent copy of the whole database at `target`. */
+  copyTo(target: string) {
+    this.db.exec(`VACUUM INTO '${target.replace(/'/g, "''")}'`);
+  }
+
   close() {
-    this.db.close();
+    if (this.db.isOpen) this.db.close();
   }
 }
 

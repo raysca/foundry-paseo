@@ -75,6 +75,18 @@ Ship, and the project manager's chat with its cards. After an update, a one-time
 the changes; a change to how Foundry acts on your code waits for Got it before those actions run. If its
 database can't be opened or upgraded, Foundry changes nothing and starts in safe mode, naming the backup.
 
+To uninstall, use Settings → Foundry → Before you uninstall, or the script. Uninstalling on its own
+deletes nothing, so reinstalling picks up where you left off:
+
+```sh
+scripts/uninstall-local.sh           # list what Foundry left behind, then remove the plugin
+scripts/uninstall-local.sh --purge   # first stop its work, remove the profiles it added that nobody changed,
+                                     # and delete its data (a final copy is kept beside the folder)
+```
+
+Branches in your repos are never deleted, and Foundry's providers stay in Paseo's settings (a plugin
+can't delete them).
+
 To test onboarding from scratch (development installs only):
 
 ```sh
