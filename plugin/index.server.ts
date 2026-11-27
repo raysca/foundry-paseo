@@ -92,6 +92,8 @@ export default function contribute(server: PluginServerContext) {
       proposals: store.all("SELECT * FROM task_proposals WHERE status IN ('proposed','approved') ORDER BY id DESC LIMIT 50"),
       questions: store.all("SELECT * FROM questions WHERE status IN ('live','waiting') ORDER BY id"),
       verifications: store.all("SELECT * FROM verifications WHERE id IN (SELECT MAX(id) FROM verifications GROUP BY feature_id)"),
+      chat: store.all("SELECT * FROM (SELECT * FROM chat ORDER BY id DESC LIMIT 300) ORDER BY id"),
+      cards: store.all("SELECT * FROM cards ORDER BY id DESC LIMIT 100"),
       ships: store.all("SELECT key, value FROM settings WHERE key LIKE 'ship:%' AND value<>''"),
       events: store.events({ limit: 200 }),
     })),
@@ -156,6 +158,18 @@ export default function contribute(server: PluginServerContext) {
           return foundry.delivery.prepare(Number(args.id));
         case "feature.accept_ship":
           return foundry.delivery.acceptShip(Number(args.id), String(args.head_sha), String(args.tree_sha), { confirmCheckedOut: args.confirm === true });
+        case "pm.send": {
+          const p = typeof args.project === "string" && isNaN(Number(args.project)) ? store.projectByKey(args.project) : store.project(Number(args.project));
+          if (!p) throw new FoundryError("NOT_FOUND", `No project ${args.project}`);
+          return foundry.pm.send(p.id, String(args.text ?? ""), String(args.thread ?? "main"), {
+            ...(args.feature ? { feature: Number(args.feature) } : {}),
+            ...(args.issue ? { issue: String(args.issue) } : {}),
+          });
+        }
+        case "card.accept":
+          return foundry.pm.accept(Number(args.id));
+        case "card.reject":
+          return foundry.pm.reject(Number(args.id));
         case "question.answer":
           return foundry.tasks.answer(Number(args.id), String(args.text ?? ""));
         case "dev.seed_feature":

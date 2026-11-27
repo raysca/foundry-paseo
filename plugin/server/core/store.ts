@@ -207,6 +207,30 @@ export interface Card {
   result: string | null;
   created_at: string;
   decided_at: string | null;
+  thread: string;
+  decided_by: Actor | null;
+}
+
+export interface ChatMessage {
+  id: number;
+  project_id: number;
+  thread: string;
+  /** you | pm | system (Foundry's own reports, such as triage) | card */
+  role: string;
+  text: string;
+  card_id: number | null;
+  context: string | null;
+  created_at: string;
+}
+
+export interface PmThread {
+  project_id: number;
+  thread: string;
+  agent_id: string | null;
+  busy: number;
+  /** The last chat message id the PM's session has received. */
+  delivered_id: number;
+  last_turn_at: string | null;
 }
 
 export interface EventRow {
@@ -335,6 +359,16 @@ const MIGRATIONS: string[] = [
      requirements TEXT NOT NULL DEFAULT '[]', workspace_id TEXT, path TEXT, reviewer_agent_id TEXT,
      created_at TEXT NOT NULL DEFAULT (datetime('now')), ended_at TEXT);
    CREATE INDEX verifications_feature ON verifications(feature_id);`,
+  // 6: the PM chat (threads as harness sessions) and its cards
+  `CREATE TABLE pm_threads (
+     project_id INTEGER NOT NULL REFERENCES projects(id), thread TEXT NOT NULL, agent_id TEXT,
+     busy INTEGER NOT NULL DEFAULT 0, delivered_id INTEGER NOT NULL DEFAULT 0, last_turn_at TEXT,
+     PRIMARY KEY(project_id, thread));
+   ALTER TABLE chat ADD COLUMN card_id INTEGER;
+   ALTER TABLE chat ADD COLUMN context TEXT;
+   ALTER TABLE cards ADD COLUMN thread TEXT NOT NULL DEFAULT 'main';
+   ALTER TABLE cards ADD COLUMN decided_by TEXT;
+   CREATE INDEX chat_thread ON chat(project_id, thread, id);`,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;

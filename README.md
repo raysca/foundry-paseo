@@ -43,7 +43,7 @@ End to end, against a real Paseo 0.18 daemon on its own home and port (needs zsh
 (cd e2e && npm install) && (cd e2e/scripted-harness && npm install)
 bash e2e/smoke.sh                 # scripted harness, as CI runs it
 HARNESS=claude bash e2e/smoke.sh  # real Claude Code, on a Mac
-bash e2e/loop2.sh                 # loop 2: two tasks through checks, review, a question and accept
+bash e2e/loop2.sh                 # loop 2: two tasks through checks, review, a question and accept; PM chat and a card
 bash e2e/loop1.sh                 # loop 1: idea to approved task list, its tasks, Verify, then Ship by local merge
 ```
 

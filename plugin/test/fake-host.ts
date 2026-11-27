@@ -20,6 +20,8 @@ export interface Turn {
   write(file: string, content: string): void;
   read(file: string): string;
   git(...args: string[]): string;
+  /** The agent's reply text for this turn (what lastReply returns). */
+  reply(text: string): void;
 }
 
 /** What an agent does in a turn. Return a non-"completed" kind to make the turn fail. */
@@ -65,6 +67,8 @@ export class FakeHost implements Host {
   timelineRows: TimelineData[] = [];
   scripts: { script: string; code: number }[] = [];
   failStart = false;
+  replies = new Map<string, string>();
+  interrupted: string[] = [];
   private pending = 0;
   private n = 0;
   private root = mkdtempSync(join(tmpdir(), "foundry-ws-"));
@@ -125,7 +129,9 @@ export class FakeHost implements Host {
           },
           read: (f) => readFileSync(join(a.path, f), "utf8"),
           git: (...args) => run(a.path, "git", ...args),
+          reply: (r) => void this.replies.set(agentId, r),
         };
+        this.replies.delete(agentId);
         let kind = "completed";
         try {
           const out = b ? b(t) : undefined;
@@ -153,12 +159,14 @@ export class FakeHost implements Host {
     }
   }
 
-  async interrupt() {}
+  async interrupt(agentId: string) {
+    this.interrupted.push(agentId);
+  }
   async agentStatus() {
     return "idle" as const;
   }
-  async lastReply() {
-    return "";
+  async lastReply(agentId: string) {
+    return this.replies.get(agentId) ?? "";
   }
 
   async createWorktreeWorkspace(o: { repo: string; title: string; branch: string; from?: string; purpose: string; visible: boolean }) {

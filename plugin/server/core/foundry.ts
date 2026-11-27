@@ -9,6 +9,7 @@ import type { Store } from "./store";
 import { TaskLoop, type LoopSettings } from "./taskloop";
 import { Planning } from "./planning";
 import { Delivery } from "./delivery";
+import { ProjectManager } from "./pm";
 
 export interface FoundryConfig {
   /** Where Foundry keeps its own files (store). Worktrees are Paseo's. */
@@ -25,6 +26,8 @@ export class Foundry {
   readonly tasks: TaskLoop;
   readonly planning: Planning;
   readonly delivery: Delivery;
+  readonly pm: ProjectManager;
+  private lastTriage = 0;
   private timer: NodeJS.Timeout | null = null;
 
   constructor(
@@ -76,12 +79,18 @@ export class Foundry {
       },
       () => this.tick(),
     );
+    this.pm = new ProjectManager(store, host, this.locks, this.tasks, () => this.requireSetup());
   }
 
-  /** One scheduler pass: start Ready work, then move features whose Build has ended to Verify. */
+  /** One scheduler pass: start Ready work, move features whose Build has ended to Verify, and every
+   * 30 seconds post failed and flagged tasks to the PM. */
   async tick() {
     await this.tasks.tick();
     await this.delivery.checkBuildDone();
+    if (Date.now() - this.lastTriage >= 30_000) {
+      this.lastTriage = Date.now();
+      await this.pm.triage();
+    }
   }
 
   /** Accept a task; the last accepted task of a feature ends its Build. */
@@ -125,6 +134,7 @@ export class Foundry {
     await this.planning.recover();
     await this.tasks.recover();
     await this.delivery.recover();
+    await this.pm.recover();
     const ms = this.cfg.tickMs ?? 2000;
     if (ms > 0 && !this.timer)
       this.timer = setInterval(() => void this.tick().catch((e) => this.store.event("tick_error", { detail: { error: String(e) } })), ms);
@@ -151,6 +161,7 @@ export class Foundry {
     const a = this.store.agent(agentId);
     if (a && (a.role === "builder" || a.role === "reviewer")) return this.tasks.onTurnEnd(agentId, outcome, tracked);
     if (a?.role === "planner") return this.planning.onTurnEnd(agentId, outcome, tracked);
+    if (a?.role === "pm" && this.pm.isPm(agentId)) return this.pm.onTurnEnd(agentId, outcome);
     this.store.event(tracked ? "turn_ended" : "untracked_turn_ended", {
       actor: tracked ? "agent" : "host-user",
       issue: a?.issue_key,

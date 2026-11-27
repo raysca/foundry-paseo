@@ -26,6 +26,7 @@ interface Session {
   tools: Map<string, Client>;
   /** The feature folder a planning session may write in, from its first prompt. */
   featureDir?: string;
+  pm?: boolean;
 }
 
 export default function contribute(server: PluginServerContext) {
@@ -161,6 +162,18 @@ async function script(s: Session, text: string): Promise<string> {
     return "wrote PROBE_WRITE.txt";
   }
   if (probe === "verdict_for_other") return call(s, "report_verdict", { decision: "fail", reason: "cross-task", issue_key: /ISSUE:(\S+)/.exec(text)?.[1] });
+
+  // The project manager: answers from the board, and proposes cards.
+  if (text.includes("You are Foundry's project manager for ")) s.pm = true;
+  if (s.pm) {
+    if (/Where are we/.test(text)) {
+      const board = JSON.parse(await call(s, "get_board", {})) as { key: string; status: string }[];
+      return `Where we are: ${board.map((i) => `${i.key} is ${i.status}`).join("; ")}.`;
+    }
+    const cancel = /Cancel (\S+-\d+)/.exec(text);
+    if (cancel) return `Proposed: ${await call(s, "propose_actions", { reason: `You asked to cancel ${cancel[1]}.`, actions: [{ action: "cancel", issue: cancel[1] }] })}`;
+    return "Noted.";
+  }
 
   // Verify: the reviewer reports on every requirement listed in its prompt.
   if (text.includes("reviewer verifying the feature")) {
