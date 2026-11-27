@@ -17,7 +17,8 @@ type PaseoApi = PluginHandlerContext["paseo"];
 const PLUGIN_ID = "foundry";
 
 export default function contribute(server: PluginServerContext) {
-  const home = process.env.FOUNDRY_HOME ?? join(homedir(), ".foundry");
+  // Not ~/.foundry: the earlier Go Foundry and the prototype kept their own databases there.
+  const home = process.env.FOUNDRY_HOME ?? join(homedir(), ".foundry-paseo");
   const store = new Store(join(home, "foundry.db"));
 
   // Effective settings: Paseo plugin settings, then an optional overlay file (the e2e kit writes one).

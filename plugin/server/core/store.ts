@@ -372,6 +372,8 @@ const MIGRATIONS: string[] = [
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
+/** Marks a database as Foundry-on-Paseo's own. */
+export const STORE_APP = "foundry-paseo";
 
 const json = (v: unknown) => JSON.stringify(v ?? null);
 
@@ -380,15 +382,33 @@ export class Store {
   /** Called after every event row is written, so the host can mirror it (timeline rows, badges, notifications). */
   onEvent?: (row: EventRow) => void;
 
-  constructor(path: string) {
+  constructor(private readonly path: string) {
     if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
     this.db = new DatabaseSync(path);
+    this.refuseForeign();
     this.db.exec("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;");
     this.migrate();
   }
 
+  private refuseForeign() {
+    // Refuse a database another program made (an older Foundry, a prototype) instead of migrating over it.
+    const tables = (this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all() as { name: string }[]).map((t) => t.name);
+    if (tables.length) {
+      const has = (t: string) => tables.includes(t);
+      const metaVal = (k: string) => (has("meta") ? (this.db.prepare("SELECT value FROM meta WHERE key=?").get(k) as { value: string } | undefined)?.value : undefined);
+      const ours = metaVal("app") === STORE_APP || (metaVal("schema_version") !== undefined && has("feature_docs"));
+      if (!ours)
+        throw new FoundryError(
+          "STORE_FOREIGN",
+          `${this.path} was made by another program (tables: ${tables.slice(0, 6).join(", ")}${tables.length > 6 ? ", …" : ""}). ` +
+            "Foundry won't change it. Move it aside, or set FOUNDRY_HOME to another folder for Foundry's data.",
+        );
+    }
+  }
+
   private migrate() {
     this.db.exec("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
+    this.db.prepare("INSERT INTO meta(key,value) VALUES('app',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(STORE_APP);
     const row = this.db.prepare("SELECT value FROM meta WHERE key='schema_version'").get() as { value: string } | undefined;
     let v = row ? Number(row.value) : 0;
     if (v > MIGRATIONS.length)
