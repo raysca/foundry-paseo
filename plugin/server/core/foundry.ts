@@ -1,23 +1,57 @@
 // Foundry's runtime: owns the store and the host, and answers host events. Loop 1, loop 2 and the PM
 // plug in here as they land; the foundations only record what happens and run the setup check.
+import { ensureIntegration } from "./features";
 import type { Host } from "./host";
-import { FoundryError } from "./model";
+import { Locks } from "./locks";
+import { FoundryError, type Actor } from "./model";
 import { checkSetup, setupReady, type Finding } from "./setup";
 import type { Store } from "./store";
+import { TaskLoop, type LoopSettings } from "./taskloop";
 
 export interface FoundryConfig {
   /** Where Foundry keeps its own files (store). Worktrees are Paseo's. */
   home: string;
+  /** Read on every use, so a settings change applies to the next step. */
+  loop: () => LoopSettings;
+  /** How often the scheduler looks for Ready work, in ms. 0 turns the timer off (tests). */
+  tickMs?: number;
 }
 
 export class Foundry {
   private lastSetup: { at: string; findings: Finding[] } | null = null;
+  readonly locks = new Locks();
+  readonly tasks: TaskLoop;
+  private timer: NodeJS.Timeout | null = null;
 
   constructor(
     readonly store: Store,
     readonly host: Host,
     readonly cfg: FoundryConfig,
-  ) {}
+  ) {
+    const settings = cfg.loop;
+    this.tasks = new TaskLoop(
+      store,
+      host,
+      this.locks,
+      {
+        get maxFixRounds() {
+          return settings().maxFixRounds;
+        },
+        get questionWindowMs() {
+          return settings().questionWindowMs;
+        },
+        get checkTimeoutMs() {
+          return settings().checkTimeoutMs;
+        },
+      },
+      () => this.requireSetup(),
+    );
+  }
+
+  stop() {
+    if (this.timer) clearInterval(this.timer);
+    this.timer = null;
+  }
 
   // ---------- setup ----------
   async runSetupCheck() {
@@ -45,6 +79,19 @@ export class Foundry {
   async recover() {
     this.store.event("foundry_started");
     await this.runSetupCheck();
+    await this.tasks.recover();
+    const ms = this.cfg.tickMs ?? 2000;
+    if (ms > 0 && !this.timer)
+      this.timer = setInterval(() => void this.tasks.tick().catch((e) => this.store.event("tick_error", { detail: { error: String(e) } })), ms);
+  }
+
+  // ---------- actions ----------
+  /** The integration workspace for a feature (made on first need). Loop 1 calls this when the plan is approved. */
+  ensureIntegration(featureId: number) {
+    return ensureIntegration(this.store, this.host, featureId);
+  }
+  startIssue(key: string, actor: Actor = "you") {
+    return this.tasks.start(key, actor);
   }
 
   // ---------- host events ----------
@@ -56,6 +103,7 @@ export class Foundry {
 
   async onTurnEnd(agentId: string, outcome: { kind: string; message?: string }, tracked: boolean) {
     const a = this.store.agent(agentId);
+    if (a && (a.role === "builder" || a.role === "reviewer")) return this.tasks.onTurnEnd(agentId, outcome, tracked);
     this.store.event(tracked ? "turn_ended" : "untracked_turn_ended", {
       actor: tracked ? "agent" : "host-user",
       issue: a?.issue_key,
@@ -66,16 +114,20 @@ export class Foundry {
   }
 
   async onWorkspaceArchived(workspaceId: string) {
-    const a = this.store.attemptByWorkspace(workspaceId);
-    if (a && !a.ended_at) this.store.event("workspace_archived_by_host", { actor: "host-user", issue: a.issue_key, attempt: a.id, detail: { workspaceId } });
+    await this.tasks.onWorkspaceArchived(workspaceId);
   }
 
   async onAgentArchived(agentId: string) {
     const a = this.store.agent(agentId);
-    if (a) this.store.event("agent_archived_by_host", { actor: "host-user", issue: a.issue_key, attempt: a.attempt_id, detail: { agentId } });
+    // Foundry archives a task's workspaces when it is accepted; only an archive mid-attempt is the host's doing.
+    const att = this.store.attemptByAgent(agentId);
+    if (a && att && !att.ended_at) this.store.event("agent_archived_by_host", { actor: "host-user", issue: a.issue_key, attempt: a.attempt_id, detail: { agentId } });
   }
 
-  async onNativeQuestion(_agentId: string, _text: string): Promise<string | null> {
-    return null;
+  /** A harness's own question tool (Claude's AskUserQuestion and the like), routed like ask_human. */
+  async onNativeQuestion(agentId: string, text: string): Promise<string | null> {
+    const a = this.store.agent(agentId);
+    if (a?.role !== "builder") return null;
+    return this.tasks.askNative(agentId, text).catch(() => null);
   }
 }

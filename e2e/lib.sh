@@ -10,6 +10,8 @@ export FOUNDRY_HOME="$WORK/foundry-home"
 export PORT="${PORT:-6790}"
 export FOUNDRY_DAEMON_URL="ws://127.0.0.1:${PORT}/ws"
 export FOUNDRY_SCRIPTED_LOG="$WORK/scripted.log"
+# Enables test-only actions (dev.seed_feature) until Loop 1 can plan a feature.
+export FOUNDRY_DEV=1
 # Paseo reports script exit codes only under zsh (scorecard: upstream ask).
 export SHELL="$(command -v zsh)"
 PASEO_BIN="${PASEO_BIN:-$E2E/node_modules/.bin/paseo}"

@@ -34,7 +34,11 @@ export async function sh(
 }
 
 export async function git(cwd: string, ...args: string[]): Promise<string> {
-  const r = await sh("git", args, { cwd });
+  return gitEnv(cwd, undefined, ...args);
+}
+
+export async function gitEnv(cwd: string, env: NodeJS.ProcessEnv | undefined, ...args: string[]): Promise<string> {
+  const r = await sh("git", args, { cwd, env });
   if (r.code !== 0) throw new Error(`git ${args.join(" ")} (in ${cwd}) failed: ${r.stderr.trim()}`);
   return r.stdout.trim();
 }
@@ -42,6 +46,17 @@ export async function git(cwd: string, ...args: string[]): Promise<string> {
 export const FOUNDRY_IDENT = ["-c", "user.name=Foundry", "-c", "user.email=foundry@localhost"];
 export const HOST_IDENT = ["-c", "user.name=Host user (untracked)", "-c", "user.email=host@localhost"];
 export const PM_IDENT = ["-c", "user.name=Foundry PM", "-c", "user.email=foundry-pm@localhost"];
+
+/**
+ * The process env with an identity's author and committer set. GIT_AUTHOR_* in the daemon's env would
+ * otherwise win over `-c user.name`, and Foundry's commits must say who made them.
+ */
+export function identEnv(ident: string[]): NodeJS.ProcessEnv {
+  const get = (k: string) => ident.find((a) => a.startsWith(`${k}=`))?.slice(k.length + 1) ?? "";
+  const name = get("user.name");
+  const email = get("user.email");
+  return { ...process.env, GIT_AUTHOR_NAME: name, GIT_AUTHOR_EMAIL: email, GIT_COMMITTER_NAME: name, GIT_COMMITTER_EMAIL: email };
+}
 
 export async function head(cwd: string) {
   return git(cwd, "rev-parse", "HEAD");
@@ -70,6 +85,6 @@ export async function commitAll(cwd: string, message: string, ident = FOUNDRY_ID
   await git(cwd, "add", "-A", "--", ...pathspec);
   const staged = await sh("git", ["diff", "--cached", "--quiet"], { cwd });
   if (staged.code === 0) return null;
-  await git(cwd, ...ident, "commit", "-q", "-m", message);
+  await gitEnv(cwd, identEnv(ident), ...ident, "commit", "-q", "-m", message);
   return head(cwd);
 }

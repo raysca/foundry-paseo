@@ -12,7 +12,7 @@ import { negotiateProviderCapabilities } from "@getpaseo/plugin/server/provider"
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { mkdirSync, writeFileSync, existsSync, readFileSync, appendFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, readFileSync, appendFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 
 const CAPS = ["prompt.message", "session.persistence", "permission"] as const;
@@ -89,6 +89,7 @@ function connection(capabilities: readonly string[]): ProviderConnection {
         if (input.prompt.input.type !== "message") return;
         const text = input.prompt.input.content.filter((p) => p.type === "text").map((p) => (p as { text: string }).text).join("\n");
         s.turn++;
+        log(`turn ${input.sessionId} #${s.turn} cwd=${s.config.cwd}: ${text.slice(0, 120).replace(/\n/g, " ")}`);
         const turnId = `${input.sessionId}-t${s.turn}`;
         emit({ type: "timeline.item", sessionId: input.sessionId, item: { type: "user_message", id: `u${s.turn}`, text, clientMessageId: input.prompt.clientMessageId } });
         emit({ type: "session.prompt_result", sessionId: input.sessionId, clientMessageId: input.prompt.clientMessageId, result: { type: "turn", turnId } });
@@ -157,45 +158,26 @@ async function script(s: Session, text: string): Promise<string> {
     write(cwd, "PROBE_WRITE.txt", "written by a turn the host user started\n");
     return "wrote PROBE_WRITE.txt";
   }
-  if (probe === "verdict_for_other") return call(s, "report_verdict", { verdict: "pass", summary: "cross-task", issue_key: /ISSUE:(\S+)/.exec(text)?.[1] });
+  if (probe === "verdict_for_other") return call(s, "report_verdict", { decision: "fail", reason: "cross-task", issue_key: /ISSUE:(\S+)/.exec(text)?.[1] });
 
-  if (text.includes("planning a Quick-flow feature")) {
-    const dir = /(\.foundry\/features\/[\w-]+)\/spec\.md/.exec(text)![1]!;
-    write(cwd, `${dir}/spec.md`, "# Shout mode\n\nshout(text) upper-cases and adds !; CLI gets --shout.\n");
-    write(cwd, `${dir}/plan.md`, "# Plan\n\n1. core.shout\n2. CLI flag\n");
-    write(cwd, `${dir}/tasks.md`, "| key | title | depends on |\n|---|---|---|\n| A | Add shout() | |\n| B | Add --shout flag | A |\n");
-    if (existsSync(join(cwd, ".foundry/PROBE_P10"))) write(cwd, "STRAY.md", "planner wrote outside the feature folder\n");
-    const r = await call(s, "propose_tasks", {
-      tasks: [
-        { key: "A", title: "Add shout(text) to shout/core.py with tests", body: "shout(text) returns text.upper() + '!'", depends_on: [] },
-        { key: "B", title: "Add --shout flag to the CLI with a test", body: "Use shout(). Ask the human whether -s should also work.", depends_on: ["A"] },
-      ],
-    });
-    return `Planned. ${r}`;
-  }
-  if (text.includes("Foundry builder working on") && /-A:/.test(text)) {
+  // Loop 2 builder. Task titles decide what the scripted builder does.
+  const task = /Foundry builder working on (\S+): (.*)/.exec(text);
+  if (task && /shout\(\)/.test(task[2]!)) {
     write(cwd, "shout/core.py", "def shout(text):\n    return text.upper() + \"!\"\n");
     write(cwd, "tests/test_core.py", "import unittest\n\nfrom shout.core import shout\n\n\nclass ShoutTest(unittest.TestCase):\n    def test_shout(self):\n        self.assertEqual(shout(\"hi\"), \"HI!\")\n");
-    if (existsSync(join(cwd, "poc/PROBE_P7"))) write(cwd, "poc/fail_once.sh", "#!/bin/sh\nexit 0\n");
     return "Added shout() with a test.";
   }
-  if (text.includes("Foundry builder working on") && /-B:/.test(text) || text.includes("ask me again")) {
+  if ((task && /flag/.test(task[2]!)) || text.includes("ask me again")) {
     const ans = await call(s, "ask_human", { question: "Should the --shout flag also accept -s?" });
-    if (ans.startsWith("No answer")) return "Stopped: waiting for the human on -s.";
+    if (ans.startsWith("Your question is waiting")) return "Stopped: waiting for the developer on -s.";
     return implementB(cwd, ans);
   }
   if (text.startsWith("Answer to your earlier question")) return implementB(cwd, text);
-  if (text.includes("Foundry check")) return "Looked at the failing check; nothing in my change causes it. Ending turn.";
-  if (text.includes("Foundry's reviewer")) {
+  if (text.startsWith("Foundry's checks failed")) return "Looked at the failing check; nothing in my change causes it. Ending turn.";
+  if (text.includes("merge conflict")) return "Nothing to merge by hand.";
+  if (text.includes("Foundry's reviewer for")) {
     const key = /reviewer for (\S+):/.exec(text)?.[1];
-    return call(s, "report_verdict", { verdict: "pass", summary: `Looks right for ${key}.` });
-  }
-  if (text.includes("Foundry's PM for this project")) return "ready";
-  if (/blocking B/i.test(text)) {
-    const board = await call(s, "foundry_board", {});
-    const b = JSON.parse(board).issues?.find((i: { key: string }) => i.key.endsWith("-B"));
-    const card = await call(s, "propose_card", { kind: "set_priority", issue_key: b?.key ?? "X-B", priority: 5, reason: "B was blocked on the -s question; finish it next." });
-    return `B (${b?.key}) was blocked by its dependency on A and then by your answer about -s. Next: ${b?.key}. ${card}`;
+    return call(s, "report_verdict", { decision: "pass", reason: `Looks right for ${key}.` });
   }
   return `echo: ${text.slice(0, 80)}`;
 }

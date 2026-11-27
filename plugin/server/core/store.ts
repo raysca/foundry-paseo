@@ -51,6 +51,8 @@ export interface Feature {
   integration_path: string | null;
   planner_agent_id: string | null;
   spec_change_open: number;
+  /** The feature branch head Foundry last wrote; anything else at accept means a merge outside Foundry. */
+  head_sha: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -274,6 +276,8 @@ const MIGRATIONS: string[] = [
   CREATE INDEX attempts_issue ON attempts(issue_key);
   CREATE INDEX runs_attempt ON runs(attempt_id);
   `,
+  // 2: the feature branch head Foundry last wrote, to catch merges made outside Foundry
+  `ALTER TABLE features ADD COLUMN head_sha TEXT;`,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
