@@ -124,4 +124,5 @@ export type Verdict = "pass" | "rework" | "fail" | "human";
 
 // ---------- Ledger and cards (PM) ----------
 
-export type CardStatus = "proposed" | "accepted" | "rejected" | "failed";
+/** applied: the PM's own card, applied at once because it touched no active work (warn-first). */
+export type CardStatus = "proposed" | "accepted" | "applied" | "rejected" | "failed";

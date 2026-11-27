@@ -4,6 +4,7 @@
 import { z } from "zod";
 import { defineAgentTool, type AgentToolDefinition } from "@getpaseo/plugin/server";
 import type { Foundry } from "../core/foundry";
+import type { PmAction } from "../core/pm";
 import { FoundryError, type Role } from "../core/model";
 import type { ToolSet } from "./paseo";
 
@@ -149,6 +150,56 @@ export function buildTools(f: Foundry): ToolSet {
     },
   });
 
+  const pmRead = <S extends z.ZodRawShape>(name: string, title: string, description: string, shape: S, fn: (agentId: string, input: z.infer<z.ZodObject<S>>) => unknown) =>
+    defineAgentTool({
+      name,
+      title,
+      description,
+      input: z.object(shape),
+      async execute(input, { agent }) {
+        try {
+          guardRole(f, agent.id, "pm");
+          return ok(fn(agent.id, input as z.infer<z.ZodObject<S>>));
+        } catch (e) {
+          return refusal(e);
+        }
+      },
+    });
+  const pmTools = [
+    pmRead("get_project_overview", "Project overview", "Features with stage, progress, coverage and what waits on the developer; issue counts by status.", {}, (id) => f.pm.overview(id)),
+    pmRead("get_board", "Board", "Every issue of the project: key, title, status, reason, flag, priority, feature.", {}, (id) => f.pm.board(id)),
+    pmRead("get_feature", "Feature", "One feature by slug or id: docs, requirements and tasks.", { feature: z.string() }, (id, i) => f.pm.feature(id, i.feature)),
+    pmRead("get_issue", "Issue", "One issue by key: details, dependencies, last attempt and recent events.", { issue: z.string() }, (id, i) => f.pm.issue(id, i.issue)),
+    pmRead("get_run_log_tail", "Run log tail", "The runs of an issue's last attempt with their output tails.", { issue: z.string() }, (id, i) => f.pm.runLogTail(id, i.issue)),
+    defineAgentTool({
+      name: "propose_actions",
+      title: "Propose actions",
+      description:
+        "Change the work: set_priority (0 to 100), retry (a Failed or Blocked task) or cancel. Actions that touch no active work apply at once; anything touching an active task, its worktree or a feature branch becomes a card with warnings that waits for the developer's yes. All actions of one call apply together or not at all.",
+      input: z.object({
+        reason: z.string().min(1),
+        actions: z
+          .array(
+            z.object({
+              action: z.enum(["set_priority", "retry", "cancel"]),
+              issue: z.string(),
+              priority: z.number().int().optional(),
+              reason: z.string().optional(),
+            }),
+          )
+          .min(1),
+      }),
+      async execute({ reason, actions }, { agent }) {
+        try {
+          guardRole(f, agent.id, "pm");
+          return ok(await f.pm.proposeActions(agent.id, actions as PmAction[], reason));
+        } catch (e) {
+          return refusal(e);
+        }
+      },
+    }),
+  ];
+
   const none: AgentToolDefinition[] = [];
-  return { builder: [askHuman, verdict("builder")], reviewer: [verdict("reviewer"), reportRequirements], planner: [askQuestions, proposeRequirements, proposeTasks], pm: none };
+  return { builder: [askHuman, verdict("builder")], reviewer: [verdict("reviewer"), reportRequirements], planner: [askQuestions, proposeRequirements, proposeTasks], pm: pmTools };
 }

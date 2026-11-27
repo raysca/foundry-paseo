@@ -1,7 +1,8 @@
 #!/bin/bash
 # Loop 2 on a real daemon: two tasks of an approved feature run unattended through build, Paseo-script
 # checks (one fix round), review and SHA-bound accept; the second asks a question nobody answers in time
-# and resumes when it is answered.
+# and resumes when it is answered. Meanwhile the PM answers from the board and its cancel of the waiting
+# task becomes a card you decline.
 source "$(dirname "$0")/lib.sh"
 rm -rf "$WORK" && mkdir -p "$WORK" "$FOUNDRY_HOME"
 trap stop_daemon EXIT
@@ -39,6 +40,17 @@ accept SHT-1
 
 log "SHT-2 starts once SHT-1 is Done, asks, the window passes"
 wait_for "$(st SHT-2)=='Awaiting_Human'" 240 "SHT-2 Awaiting_Human"
+
+log "the PM answers from the board, and its cancel of SHT-2 (active work) waits on a card you decline"
+pmsays() { echo "[m['text'] for m in d['chat'] if m['role']=='pm']"; }
+fact pm.send '{"project":"SHT","text":"Where are we?"}' | python3 -c "import json,sys;r=json.load(sys.stdin);assert 'error' not in r, r"
+wait_for "any('SHT-2 is Awaiting_Human' in t for t in $(pmsays))" 60 "PM answered from the board"
+fact pm.send '{"project":"SHT","text":"Cancel SHT-2"}' >/dev/null
+wait_for "len(d['cards'])==1 and len($(pmsays))==2" 60 "PM proposed a card"
+CARD=$(q "c=d['cards'][0]; import json; w=json.loads(c['warnings']); assert c['status']=='proposed' and 'SHT-2 is Awaiting_Human' in w[0], c; print(c['id'])")
+fact card.reject "{\"id\":$CARD}" | python3 -c "import json,sys;r=json.load(sys.stdin);assert r.get('status')=='rejected', r;print('card declined')"
+q "assert $(st SHT-2)=='Awaiting_Human'; print('SHT-2 untouched')"
+
 QID=$(q "print([x['id'] for x in d['questions'] if x['issue_key']=='SHT-2'][0])")
 fact question.answer "{\"id\":$QID,\"text\":\"yes, -s too\"}" >/dev/null
 wait_for "$(st SHT-2)=='In_Review'" 240 "SHT-2 In_Review after the late answer"

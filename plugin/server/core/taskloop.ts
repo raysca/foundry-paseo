@@ -684,6 +684,26 @@ export class TaskLoop {
     return this.store.attempt(a.id)!;
   }
 
+  /**
+   * Cancel an issue (call inside a card's transaction). A running attempt is ended as cancelled; the
+   * returned agents should be interrupted once the transaction commits.
+   */
+  cancel(key: string, actor: Actor): string[] {
+    const i = this.store.issue(key);
+    if (!i) throw new FoundryError("NOT_FOUND", `No issue ${key}`);
+    const stop: string[] = [];
+    this.store.tx(() => {
+      const a = this.store.activeAttempts().find((x) => x.issue_key === key);
+      if (a) {
+        this.store.updateAttempt(a.id, { outcome: "failed", flag: "CANCELLED", step: "ended", ended_at: new Date().toISOString() });
+        this.store.event("attempt_ended", { actor, issue: key, attempt: a.id, detail: { outcome: "failed", flag: "CANCELLED", detail: "cancelled", head: a.head_sha } });
+        for (const id of [a.builder_agent_id, a.reviewer_agent_id]) if (id) stop.push(id);
+      }
+      this.store.setIssueStatus(key, "Cancelled", actor);
+    });
+    return stop;
+  }
+
   // ---------- recovery and host changes ----------
   async onWorkspaceArchived(workspaceId: string) {
     const a = this.store.attemptByWorkspace(workspaceId);

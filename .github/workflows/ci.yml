@@ -46,7 +46,7 @@ jobs:
         working-directory: e2e/scripted-harness
       - run: git config --global user.email ci@localhost && git config --global user.name CI
       - run: bash e2e/smoke.sh
-      - name: loop 2 (two tasks through build, checks, a fix round, review, a late answer and accept)
+      - name: loop 2 (two tasks through build, checks, a fix round, review, a late answer and accept; the PM chat and a declined card)
         run: bash e2e/loop2.sh
       - name: loop 1 into loop 2 (idea, Clarify, spec, plan and task list approved, tasks run and accepted)
         run: bash e2e/loop1.sh
