@@ -1,0 +1,46 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: plugin
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: plugin/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+
+  e2e:
+    # A real Paseo daemon with the scripted harness: the plugin loads, attaches with no client
+    # open, and its setup check passes on a good daemon and names what's missing on a broken one.
+    runs-on: ubuntu-latest
+    needs: unit
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: zsh (Paseo reports script exit codes only under zsh)
+        run: sudo apt-get update && sudo apt-get install -y zsh
+      - run: npm ci
+        working-directory: plugin
+      - run: npm ci
+        working-directory: e2e
+      - run: npm ci
+        working-directory: e2e/scripted-harness
+      - run: git config --global user.email ci@localhost && git config --global user.name CI
+      - run: bash e2e/smoke.sh
+      - name: daemon log on failure
+        if: failure()
+        run: tail -200 "${TMPDIR:-/tmp}/foundry-e2e/paseo-home/daemon.log" || true

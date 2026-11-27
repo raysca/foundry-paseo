@@ -1,0 +1,4 @@
+{ "name": "foundry-scripted", "private": true, "version": "0.0.0",
+  "scripts": { "typecheck": "tsc --noEmit" },
+  "dependencies": { "@modelcontextprotocol/sdk": "^1.20.0" },
+  "devDependencies": { "@getpaseo/plugin": "0.18.0", "@types/node": "^22.10.0", "typescript": "^5.9.3", "zod": "^4.4.3" } }

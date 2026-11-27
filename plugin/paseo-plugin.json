@@ -1,0 +1,8 @@
+{
+  "id": "foundry",
+  "name": "Foundry",
+  "media": [],
+  "requirements": {
+    "paseo": ">=0.18.0"
+  }
+}

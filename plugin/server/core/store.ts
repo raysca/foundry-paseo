@@ -1,0 +1,639 @@
+// Foundry's durable store: SQLite in the plugin process (node:sqlite). Host-independent.
+// The schema follows the behaviour spec's domain model. Migrations are numbered and only ever appended.
+import { DatabaseSync, type SQLInputValue } from "node:sqlite";
+import { mkdirSync } from "node:fs";
+import { dirname } from "node:path";
+import {
+  assertTransition,
+  FoundryError,
+  type Actor,
+  type AttemptOutcome,
+  type AttemptStep,
+  type CardStatus,
+  type DocKind,
+  type DocStatus,
+  type FeatureFlow,
+  type FeatureStage,
+  type FeatureStatus,
+  type IssueOrigin,
+  type IssueStatus,
+  type ReasonCode,
+  type Role,
+  type RunKind,
+  type RunStatus,
+  type Size,
+} from "./model";
+
+// ---------- Row types ----------
+
+export interface Project {
+  id: number;
+  key: string;
+  name: string;
+  repo: string;
+  base_ref: string;
+  default_loop: string | null;
+  next_issue_n: number;
+  created_at: string;
+}
+
+export interface Feature {
+  id: number;
+  project_id: number;
+  slug: string;
+  title: string;
+  idea: string;
+  flow: FeatureFlow;
+  stage: FeatureStage;
+  status: FeatureStatus;
+  branch: string;
+  integration_workspace_id: string | null;
+  integration_path: string | null;
+  planner_agent_id: string | null;
+  spec_change_open: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface FeatureDoc {
+  feature_id: number;
+  kind: DocKind;
+  status: DocStatus;
+  head_sha: string | null;
+  approved_sha: string | null;
+}
+
+export interface Requirement {
+  feature_id: number;
+  ref: string;
+  title: string;
+  criteria: string; // JSON string[]
+  spec_sha: string | null;
+  retired: number;
+}
+
+export interface Issue {
+  key: string;
+  project_id: number;
+  feature_id: number | null;
+  origin: IssueOrigin;
+  title: string;
+  description: string;
+  acceptance: string;
+  status: IssueStatus;
+  reason: ReasonCode | null;
+  priority: number;
+  size: Size | null;
+  loop: string | null;
+  checks: string; // JSON
+  touches: string; // JSON string[]
+  requirement_refs: string; // JSON string[]
+  profile: string | null;
+  max_fix_rounds: number | null;
+  flag: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface IssueDep {
+  issue_key: string;
+  depends_on: string;
+  reason: string;
+}
+
+export interface Attempt {
+  id: number;
+  issue_key: string;
+  n: number;
+  branch: string;
+  workspace_id: string | null;
+  worktree_path: string | null;
+  builder_agent_id: string | null;
+  reviewer_agent_id: string | null;
+  check_workspace_id: string | null;
+  check_path: string | null;
+  loop: string | null; // JSON: the loop definition frozen from base at start
+  step: AttemptStep;
+  step_index: number;
+  outcome: AttemptOutcome | null;
+  flag: string | null;
+  fix_rounds: number;
+  reworks: number;
+  head_sha: string | null;
+  tree_sha: string | null;
+  started_at: string;
+  ended_at: string | null;
+}
+
+export interface Run {
+  id: number;
+  attempt_id: number | null;
+  feature_id: number | null;
+  kind: RunKind;
+  agent_id: string | null;
+  status: RunStatus;
+  sha: string | null;
+  detail: string; // JSON
+  started_at: string;
+  ended_at: string | null;
+}
+
+export interface AgentRecord {
+  agent_id: string;
+  role: Role;
+  project_id: number | null;
+  feature_id: number | null;
+  issue_key: string | null;
+  attempt_id: number | null;
+  workspace_id: string | null;
+  created_at: string;
+}
+
+export interface Question {
+  id: number;
+  issue_key: string | null;
+  attempt_id: number | null;
+  feature_id: number | null;
+  agent_id: string;
+  text: string;
+  choices: string; // JSON
+  status: "live" | "waiting" | "answered" | "closed";
+  answer: string | null;
+  asked_at: string;
+  answered_at: string | null;
+}
+
+export interface Card {
+  id: number;
+  project_id: number;
+  kind: string;
+  actions: string; // JSON
+  reason: string;
+  warnings: string; // JSON string[]
+  status: CardStatus;
+  result: string | null;
+  created_at: string;
+  decided_at: string | null;
+}
+
+export interface EventRow {
+  id: number;
+  at: string;
+  actor: Actor;
+  kind: string;
+  project_id: number | null;
+  feature_id: number | null;
+  issue_key: string | null;
+  attempt_id: number | null;
+  detail: string; // JSON
+}
+
+export interface EventOpts {
+  actor?: Actor;
+  project?: number | null;
+  feature?: number | null;
+  issue?: string | null;
+  attempt?: number | null;
+  detail?: unknown;
+}
+
+// ---------- Migrations ----------
+
+const MIGRATIONS: string[] = [
+  // 1: the spec's model, M1 cut
+  `
+  CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+  CREATE TABLE projects (
+    id INTEGER PRIMARY KEY, key TEXT NOT NULL UNIQUE, name TEXT NOT NULL, repo TEXT NOT NULL UNIQUE,
+    base_ref TEXT NOT NULL, default_loop TEXT, next_issue_n INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')));
+  CREATE TABLE features (
+    id INTEGER PRIMARY KEY, project_id INTEGER NOT NULL REFERENCES projects(id), slug TEXT NOT NULL,
+    title TEXT NOT NULL, idea TEXT NOT NULL, flow TEXT NOT NULL DEFAULT 'standard',
+    stage TEXT NOT NULL DEFAULT 'clarify', status TEXT NOT NULL DEFAULT 'active', branch TEXT NOT NULL,
+    integration_workspace_id TEXT, integration_path TEXT, planner_agent_id TEXT,
+    spec_change_open INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')), updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(project_id, slug));
+  CREATE TABLE feature_docs (
+    feature_id INTEGER NOT NULL REFERENCES features(id), kind TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'drafting',
+    head_sha TEXT, approved_sha TEXT, PRIMARY KEY(feature_id, kind));
+  CREATE TABLE requirements (
+    feature_id INTEGER NOT NULL REFERENCES features(id), ref TEXT NOT NULL, title TEXT NOT NULL,
+    criteria TEXT NOT NULL DEFAULT '[]', spec_sha TEXT, retired INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY(feature_id, ref));
+  CREATE TABLE task_proposals (
+    id INTEGER PRIMARY KEY, feature_id INTEGER NOT NULL REFERENCES features(id), kind TEXT NOT NULL DEFAULT 'initial',
+    tasks TEXT NOT NULL, tasks_sha TEXT, status TEXT NOT NULL DEFAULT 'proposed',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')));
+  CREATE TABLE issues (
+    key TEXT PRIMARY KEY, project_id INTEGER NOT NULL REFERENCES projects(id), feature_id INTEGER REFERENCES features(id),
+    origin TEXT NOT NULL, title TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', acceptance TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL, reason TEXT, priority INTEGER NOT NULL DEFAULT 50, size TEXT, loop TEXT,
+    checks TEXT NOT NULL DEFAULT '{}', touches TEXT NOT NULL DEFAULT '[]', requirement_refs TEXT NOT NULL DEFAULT '[]',
+    profile TEXT, max_fix_rounds INTEGER, flag TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')), updated_at TEXT NOT NULL DEFAULT (datetime('now')));
+  CREATE TABLE issue_deps (
+    issue_key TEXT NOT NULL REFERENCES issues(key), depends_on TEXT NOT NULL REFERENCES issues(key),
+    reason TEXT NOT NULL DEFAULT '', PRIMARY KEY(issue_key, depends_on));
+  CREATE TABLE attempts (
+    id INTEGER PRIMARY KEY, issue_key TEXT NOT NULL REFERENCES issues(key), n INTEGER NOT NULL, branch TEXT NOT NULL,
+    workspace_id TEXT, worktree_path TEXT, builder_agent_id TEXT, reviewer_agent_id TEXT,
+    check_workspace_id TEXT, check_path TEXT, loop TEXT, step TEXT NOT NULL DEFAULT 'setup',
+    step_index INTEGER NOT NULL DEFAULT 0, outcome TEXT, flag TEXT,
+    fix_rounds INTEGER NOT NULL DEFAULT 0, reworks INTEGER NOT NULL DEFAULT 0, head_sha TEXT, tree_sha TEXT,
+    started_at TEXT NOT NULL DEFAULT (datetime('now')), ended_at TEXT, UNIQUE(issue_key, n));
+  CREATE TABLE runs (
+    id INTEGER PRIMARY KEY, attempt_id INTEGER REFERENCES attempts(id), feature_id INTEGER REFERENCES features(id),
+    kind TEXT NOT NULL, agent_id TEXT, status TEXT NOT NULL DEFAULT 'running', sha TEXT, detail TEXT NOT NULL DEFAULT '{}',
+    started_at TEXT NOT NULL DEFAULT (datetime('now')), ended_at TEXT);
+  CREATE TABLE reviews (
+    id INTEGER PRIMARY KEY, attempt_id INTEGER REFERENCES attempts(id), feature_id INTEGER REFERENCES features(id),
+    actor TEXT NOT NULL, decision TEXT NOT NULL, head_sha TEXT, tree_sha TEXT, feedback TEXT NOT NULL DEFAULT '',
+    findings TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL DEFAULT (datetime('now')));
+  CREATE TABLE agents (
+    agent_id TEXT PRIMARY KEY, role TEXT NOT NULL, project_id INTEGER, feature_id INTEGER, issue_key TEXT,
+    attempt_id INTEGER, workspace_id TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')));
+  CREATE TABLE questions (
+    id INTEGER PRIMARY KEY, issue_key TEXT, attempt_id INTEGER, feature_id INTEGER, agent_id TEXT NOT NULL,
+    text TEXT NOT NULL, choices TEXT NOT NULL DEFAULT '[]', status TEXT NOT NULL DEFAULT 'live', answer TEXT,
+    asked_at TEXT NOT NULL DEFAULT (datetime('now')), answered_at TEXT);
+  CREATE TABLE cards (
+    id INTEGER PRIMARY KEY, project_id INTEGER NOT NULL REFERENCES projects(id), kind TEXT NOT NULL,
+    actions TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '', warnings TEXT NOT NULL DEFAULT '[]',
+    status TEXT NOT NULL DEFAULT 'proposed', result TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')), decided_at TEXT);
+  CREATE TABLE chat (
+    id INTEGER PRIMARY KEY, project_id INTEGER NOT NULL REFERENCES projects(id), thread TEXT NOT NULL DEFAULT 'main',
+    role TEXT NOT NULL, text TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')));
+  CREATE TABLE events (
+    id INTEGER PRIMARY KEY, at TEXT NOT NULL DEFAULT (datetime('now')), actor TEXT NOT NULL, kind TEXT NOT NULL,
+    project_id INTEGER, feature_id INTEGER, issue_key TEXT, attempt_id INTEGER, detail TEXT NOT NULL DEFAULT '{}');
+  CREATE INDEX events_issue ON events(issue_key);
+  CREATE INDEX events_feature ON events(feature_id);
+  CREATE INDEX attempts_issue ON attempts(issue_key);
+  CREATE INDEX runs_attempt ON runs(attempt_id);
+  `,
+];
+
+export const SCHEMA_VERSION = MIGRATIONS.length;
+
+const json = (v: unknown) => JSON.stringify(v ?? null);
+
+export class Store {
+  readonly db: DatabaseSync;
+  /** Called after every event row is written, so the host can mirror it (timeline rows, badges, notifications). */
+  onEvent?: (row: EventRow) => void;
+
+  constructor(path: string) {
+    if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
+    this.db = new DatabaseSync(path);
+    this.db.exec("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;");
+    this.migrate();
+  }
+
+  private migrate() {
+    this.db.exec("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
+    const row = this.db.prepare("SELECT value FROM meta WHERE key='schema_version'").get() as { value: string } | undefined;
+    let v = row ? Number(row.value) : 0;
+    if (v > MIGRATIONS.length)
+      throw new Error(`Foundry store is at schema ${v}, newer than this plugin (${MIGRATIONS.length}). Update the plugin.`);
+    while (v < MIGRATIONS.length) {
+      this.tx(() => {
+        this.db.exec(MIGRATIONS[v]!);
+        v++;
+        this.db.prepare("INSERT INTO meta(key,value) VALUES('schema_version',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(String(v));
+      });
+    }
+  }
+
+  // ---------- low level ----------
+  run(sql: string, ...p: SQLInputValue[]) {
+    return this.db.prepare(sql).run(...p);
+  }
+  get<T>(sql: string, ...p: SQLInputValue[]): T | undefined {
+    return this.db.prepare(sql).get(...p) as T | undefined;
+  }
+  all<T>(sql: string, ...p: SQLInputValue[]): T[] {
+    return this.db.prepare(sql).all(...p) as T[];
+  }
+  private depth = 0;
+  /** Run fn in one transaction (nested calls join the outer one). All-or-nothing writes go through here. */
+  tx<T>(fn: () => T): T {
+    if (this.depth > 0) return fn();
+    this.db.exec("BEGIN IMMEDIATE");
+    this.depth++;
+    try {
+      const r = fn();
+      this.db.exec("COMMIT");
+      return r;
+    } catch (e) {
+      this.db.exec("ROLLBACK");
+      throw e;
+    } finally {
+      this.depth--;
+    }
+  }
+
+  // ---------- settings ----------
+  setting(key: string): string | undefined {
+    return this.get<{ value: string }>("SELECT value FROM settings WHERE key=?", key)?.value;
+  }
+  setSetting(key: string, value: string) {
+    this.run("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", key, value);
+  }
+
+  // ---------- events ----------
+  event(kind: string, o: EventOpts = {}): number {
+    const r = this.run(
+      "INSERT INTO events(actor,kind,project_id,feature_id,issue_key,attempt_id,detail) VALUES(?,?,?,?,?,?,?)",
+      o.actor ?? "system",
+      kind,
+      o.project ?? null,
+      o.feature ?? null,
+      o.issue ?? null,
+      o.attempt ?? null,
+      json(o.detail ?? {}),
+    );
+    const id = Number(r.lastInsertRowid);
+    if (this.onEvent) {
+      const row = this.get<EventRow>("SELECT * FROM events WHERE id=?", id)!;
+      try {
+        this.onEvent(row);
+      } catch {
+        // mirroring must never break the write path
+      }
+    }
+    return id;
+  }
+  events(filter: { issue?: string; feature?: number; sinceId?: number; limit?: number } = {}): EventRow[] {
+    const where: string[] = [];
+    const p: SQLInputValue[] = [];
+    if (filter.issue) (where.push("issue_key=?"), p.push(filter.issue));
+    if (filter.feature) (where.push("feature_id=?"), p.push(filter.feature));
+    if (filter.sinceId) (where.push("id>?"), p.push(filter.sinceId));
+    const sql = `SELECT * FROM events ${where.length ? "WHERE " + where.join(" AND ") : ""} ORDER BY id DESC LIMIT ?`;
+    return this.all<EventRow>(sql, ...p, filter.limit ?? 200).reverse();
+  }
+
+  // ---------- projects ----------
+  createProject(p: { key: string; name: string; repo: string; baseRef: string }): Project {
+    if (!/^[A-Z]{2,5}$/.test(p.key)) throw new FoundryError("INVALID_KEY", "A project key is 2 to 5 capital letters");
+    if (this.get("SELECT 1 FROM projects WHERE key=?", p.key)) throw new FoundryError("KEY_TAKEN", `Key ${p.key} is already used`);
+    const r = this.run("INSERT INTO projects(key,name,repo,base_ref) VALUES(?,?,?,?)", p.key, p.name, p.repo, p.baseRef);
+    const project = this.project(Number(r.lastInsertRowid))!;
+    this.event("project_created", { actor: "you", project: project.id, detail: { key: p.key, repo: p.repo } });
+    return project;
+  }
+  project(id: number) {
+    return this.get<Project>("SELECT * FROM projects WHERE id=?", id);
+  }
+  projectByKey(key: string) {
+    return this.get<Project>("SELECT * FROM projects WHERE key=?", key);
+  }
+  projects() {
+    return this.all<Project>("SELECT * FROM projects ORDER BY id");
+  }
+
+  // ---------- features ----------
+  createFeature(f: { projectId: number; slug: string; title: string; idea: string; flow: FeatureFlow; branch: string }): Feature {
+    return this.tx(() => {
+      const r = this.run(
+        "INSERT INTO features(project_id,slug,title,idea,flow,branch) VALUES(?,?,?,?,?,?)",
+        f.projectId,
+        f.slug,
+        f.title,
+        f.idea,
+        f.flow,
+        f.branch,
+      );
+      const id = Number(r.lastInsertRowid);
+      for (const kind of ["spec", "plan", "tasks"] as DocKind[]) this.run("INSERT INTO feature_docs(feature_id,kind) VALUES(?,?)", id, kind);
+      this.event("feature_created", { actor: "you", project: f.projectId, feature: id, detail: { slug: f.slug, title: f.title } });
+      return this.feature(id)!;
+    });
+  }
+  feature(id: number) {
+    return this.get<Feature>("SELECT * FROM features WHERE id=?", id);
+  }
+  featureBySlug(projectId: number, slug: string) {
+    return this.get<Feature>("SELECT * FROM features WHERE project_id=? AND slug=?", projectId, slug);
+  }
+  features(projectId?: number) {
+    return projectId
+      ? this.all<Feature>("SELECT * FROM features WHERE project_id=? ORDER BY id", projectId)
+      : this.all<Feature>("SELECT * FROM features ORDER BY id");
+  }
+  updateFeature(id: number, patch: Partial<Omit<Feature, "id" | "project_id" | "created_at">>) {
+    this.patch("features", "id", id, { ...patch, updated_at: new Date().toISOString() });
+  }
+  setStage(id: number, stage: FeatureStage, actor: Actor = "system") {
+    const f = this.feature(id)!;
+    if (f.stage === stage) return;
+    this.updateFeature(id, { stage });
+    this.event("stage_changed", { actor, project: f.project_id, feature: id, detail: { from: f.stage, to: stage } });
+  }
+  doc(featureId: number, kind: DocKind) {
+    return this.get<FeatureDoc>("SELECT * FROM feature_docs WHERE feature_id=? AND kind=?", featureId, kind)!;
+  }
+  docs(featureId: number) {
+    return this.all<FeatureDoc>("SELECT * FROM feature_docs WHERE feature_id=? ORDER BY kind", featureId);
+  }
+  updateDoc(featureId: number, kind: DocKind, patch: Partial<Pick<FeatureDoc, "status" | "head_sha" | "approved_sha">>) {
+    const sets = Object.keys(patch).map((k) => `${k}=?`);
+    if (!sets.length) return;
+    this.run(`UPDATE feature_docs SET ${sets.join(",")} WHERE feature_id=? AND kind=?`, ...(Object.values(patch) as SQLInputValue[]), featureId, kind);
+  }
+  requirements(featureId: number, includeRetired = false) {
+    return this.all<Requirement>(
+      `SELECT * FROM requirements WHERE feature_id=? ${includeRetired ? "" : "AND retired=0"} ORDER BY ref`,
+      featureId,
+    );
+  }
+
+  // ---------- issues ----------
+  /** Allocate the next issue key for a project (KEY-n). */
+  nextIssueKey(projectId: number): string {
+    return this.tx(() => {
+      const p = this.project(projectId)!;
+      this.run("UPDATE projects SET next_issue_n=next_issue_n+1 WHERE id=?", projectId);
+      return `${p.key}-${p.next_issue_n}`;
+    });
+  }
+  createIssue(i: {
+    projectId: number;
+    featureId?: number | null;
+    origin: IssueOrigin;
+    title: string;
+    description?: string;
+    acceptance?: string;
+    status: IssueStatus;
+    priority?: number;
+    size?: Size | null;
+    loop?: string | null;
+    checks?: unknown;
+    touches?: string[];
+    requirementRefs?: string[];
+    profile?: string | null;
+    actor?: Actor;
+  }): Issue {
+    return this.tx(() => {
+      const key = this.nextIssueKey(i.projectId);
+      this.run(
+        `INSERT INTO issues(key,project_id,feature_id,origin,title,description,acceptance,status,priority,size,loop,checks,touches,requirement_refs,profile)
+         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        key,
+        i.projectId,
+        i.featureId ?? null,
+        i.origin,
+        i.title,
+        i.description ?? "",
+        i.acceptance ?? "",
+        i.status,
+        i.priority ?? 50,
+        i.size ?? null,
+        i.loop ?? null,
+        json(i.checks ?? {}),
+        json(i.touches ?? []),
+        json(i.requirementRefs ?? []),
+        i.profile ?? null,
+      );
+      this.event("issue_created", { actor: i.actor ?? "system", project: i.projectId, feature: i.featureId ?? null, issue: key, detail: { status: i.status, origin: i.origin } });
+      return this.issue(key)!;
+    });
+  }
+  issue(key: string) {
+    return this.get<Issue>("SELECT * FROM issues WHERE key=?", key);
+  }
+  issues(filter: { projectId?: number; featureId?: number; status?: IssueStatus } = {}) {
+    const where: string[] = [];
+    const p: SQLInputValue[] = [];
+    if (filter.projectId) (where.push("project_id=?"), p.push(filter.projectId));
+    if (filter.featureId) (where.push("feature_id=?"), p.push(filter.featureId));
+    if (filter.status) (where.push("status=?"), p.push(filter.status));
+    return this.all<Issue>(`SELECT * FROM issues ${where.length ? "WHERE " + where.join(" AND ") : ""} ORDER BY priority DESC, created_at, key`, ...p);
+  }
+  /** The one way to change an issue's status: checks the transition and records it with its actor. */
+  setIssueStatus(key: string, to: IssueStatus, actor: Actor, reason: ReasonCode | null = null, detail: Record<string, unknown> = {}) {
+    const i = this.issue(key);
+    if (!i) throw new FoundryError("NOT_FOUND", `No issue ${key}`);
+    if (i.status === to && i.reason === reason) return;
+    assertTransition(i.status, to, actor);
+    this.run("UPDATE issues SET status=?, reason=?, updated_at=datetime('now') WHERE key=?", to, reason, key);
+    this.event("issue_status", { actor, project: i.project_id, feature: i.feature_id, issue: key, detail: { from: i.status, to, reason, ...detail } });
+  }
+  updateIssue(key: string, patch: Partial<Omit<Issue, "key" | "project_id" | "status" | "created_at">>, actor: Actor = "system") {
+    const i = this.issue(key)!;
+    this.patch("issues", "key", key, { ...patch, updated_at: new Date().toISOString() });
+    this.event("issue_updated", { actor, project: i.project_id, feature: i.feature_id, issue: key, detail: { fields: Object.keys(patch) } });
+  }
+  deps(key: string) {
+    return this.all<IssueDep>("SELECT * FROM issue_deps WHERE issue_key=? ORDER BY depends_on", key);
+  }
+  dependents(key: string) {
+    return this.all<IssueDep>("SELECT * FROM issue_deps WHERE depends_on=? ORDER BY issue_key", key);
+  }
+  addDep(key: string, dependsOn: string, reason = "") {
+    this.run("INSERT OR REPLACE INTO issue_deps(issue_key,depends_on,reason) VALUES(?,?,?)", key, dependsOn, reason);
+  }
+
+  // ---------- attempts and runs ----------
+  createAttempt(issueKey: string, branch: string, loop: unknown): Attempt {
+    return this.tx(() => {
+      const n = (this.get<{ n: number }>("SELECT COALESCE(MAX(n),0) n FROM attempts WHERE issue_key=?", issueKey)?.n ?? 0) + 1;
+      const r = this.run("INSERT INTO attempts(issue_key,n,branch,loop) VALUES(?,?,?,?)", issueKey, n, branch.replace("{n}", String(n)), json(loop));
+      return this.attempt(Number(r.lastInsertRowid))!;
+    });
+  }
+  attempt(id: number) {
+    return this.get<Attempt>("SELECT * FROM attempts WHERE id=?", id);
+  }
+  latestAttempt(issueKey: string) {
+    return this.get<Attempt>("SELECT * FROM attempts WHERE issue_key=? ORDER BY n DESC LIMIT 1", issueKey);
+  }
+  attemptByAgent(agentId: string) {
+    return this.get<Attempt>("SELECT * FROM attempts WHERE builder_agent_id=? OR reviewer_agent_id=? ORDER BY id DESC LIMIT 1", agentId, agentId);
+  }
+  attemptByWorkspace(workspaceId: string) {
+    return this.get<Attempt>("SELECT * FROM attempts WHERE workspace_id=? ORDER BY id DESC LIMIT 1", workspaceId);
+  }
+  activeAttempts() {
+    return this.all<Attempt>("SELECT * FROM attempts WHERE ended_at IS NULL ORDER BY id");
+  }
+  updateAttempt(id: number, patch: Partial<Omit<Attempt, "id" | "issue_key" | "n" | "started_at">>) {
+    this.patch("attempts", "id", id, patch);
+  }
+  startRun(kind: RunKind, o: { attempt?: number | null; feature?: number | null; agent?: string | null; sha?: string | null; detail?: unknown }) {
+    const r = this.run(
+      "INSERT INTO runs(attempt_id,feature_id,kind,agent_id,sha,detail) VALUES(?,?,?,?,?,?)",
+      o.attempt ?? null,
+      o.feature ?? null,
+      kind,
+      o.agent ?? null,
+      o.sha ?? null,
+      json(o.detail ?? {}),
+    );
+    return Number(r.lastInsertRowid);
+  }
+  endRun(id: number, status: RunStatus, detail?: Record<string, unknown>, sha?: string | null) {
+    const prev = this.get<Run>("SELECT * FROM runs WHERE id=?", id);
+    const merged = { ...(prev ? JSON.parse(prev.detail) : {}), ...(detail ?? {}) };
+    this.run("UPDATE runs SET status=?, detail=?, sha=COALESCE(?,sha), ended_at=datetime('now') WHERE id=?", status, json(merged), sha ?? null, id);
+  }
+  runs(attemptId: number) {
+    return this.all<Run>("SELECT * FROM runs WHERE attempt_id=? ORDER BY id", attemptId);
+  }
+
+  // ---------- agents Foundry owns ----------
+  registerAgent(a: Omit<AgentRecord, "created_at">) {
+    this.run(
+      "INSERT OR REPLACE INTO agents(agent_id,role,project_id,feature_id,issue_key,attempt_id,workspace_id) VALUES(?,?,?,?,?,?,?)",
+      a.agent_id,
+      a.role,
+      a.project_id,
+      a.feature_id,
+      a.issue_key,
+      a.attempt_id,
+      a.workspace_id,
+    );
+  }
+  agent(agentId: string) {
+    return this.get<AgentRecord>("SELECT * FROM agents WHERE agent_id=?", agentId);
+  }
+  setAgentWorkspace(agentId: string, workspaceId: string) {
+    this.run("UPDATE agents SET workspace_id=? WHERE agent_id=?", workspaceId, agentId);
+  }
+  /** Workspace paths only Foundry may start agents and terminals in (integration and check checkouts). */
+  ownedPaths(): string[] {
+    const rows = [
+      ...this.all<{ p: string | null }>("SELECT integration_path p FROM features"),
+      ...this.all<{ p: string | null }>("SELECT check_path p FROM attempts WHERE ended_at IS NULL"),
+    ];
+    return rows.map((r) => r.p).filter((p): p is string => !!p);
+  }
+
+  // ---------- generic patch ----------
+  private patch(table: string, idCol: string, id: SQLInputValue, patch: Record<string, unknown>) {
+    const keys = Object.keys(patch).filter((k) => patch[k] !== undefined);
+    if (!keys.length) return;
+    const vals = keys.map((k) => {
+      const v = patch[k];
+      return v === null || typeof v === "string" || typeof v === "number" || typeof v === "bigint" ? (v as SQLInputValue) : json(v);
+    });
+    this.run(`UPDATE ${table} SET ${keys.map((k) => `${k}=?`).join(",")} WHERE ${idCol}=?`, ...vals, id);
+  }
+
+  close() {
+    this.db.close();
+  }
+}
+
+/** Parse a JSON column with a fallback, for callers reading rows. */
+export function parse<T>(raw: string | null | undefined, fallback: T): T {
+  if (raw == null || raw === "") return fallback;
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return fallback;
+  }
+}

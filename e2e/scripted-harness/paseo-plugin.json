@@ -1,0 +1,1 @@
+{ "id": "foundry-scripted", "description": "Test double: a scripted harness for Foundry's e2e suite", "requirements": { "paseo": ">=0.18.0" } }
