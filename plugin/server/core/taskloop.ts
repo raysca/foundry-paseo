@@ -561,6 +561,42 @@ export class TaskLoop {
   }
 
   // ---------- your review ----------
+  /** What the review panel shows: the attempt at the SHAs you would accept, its diff against the feature head, checks and verdicts. */
+  async review(key: string) {
+    const i = this.store.issue(key);
+    if (!i) throw new FoundryError("NOT_FOUND", `No issue ${key}`);
+    const a = this.store.latestAttempt(key);
+    const runs = a ? this.store.all<{ id: number; kind: string; status: string; sha: string | null; detail: string; started_at: string; ended_at: string | null }>("SELECT id,kind,status,sha,detail,started_at,ended_at FROM runs WHERE attempt_id=? ORDER BY id", a.id) : [];
+    const events = this.store.all<{ id: number; at: string; actor: string; kind: string; detail: string }>("SELECT id,at,actor,kind,detail FROM events WHERE issue_key=? ORDER BY id DESC LIMIT 50", key);
+    const questions = this.store.all("SELECT * FROM questions WHERE issue_key=? ORDER BY id", key);
+    let diff = "";
+    let stat = "";
+    let tree_sha: string | null = null;
+    if (a?.head_sha) {
+      const p = this.store.project(i.project_id)!;
+      const f = i.feature_id ? this.store.feature(i.feature_id) : null;
+      const cwd = a.worktree_path && existsSync(a.worktree_path) ? a.worktree_path : p.repo;
+      const base = f?.head_sha ? await git(cwd, "merge-base", f.head_sha, a.head_sha).catch(() => "") : "";
+      if (base) {
+        diff = await git(cwd, "diff", "--no-color", base, a.head_sha).catch(() => "");
+        stat = await git(cwd, "diff", "--stat", "--no-color", base, a.head_sha).catch(() => "");
+      }
+      tree_sha = await treeOf(cwd, a.head_sha).catch(() => null);
+    }
+    const MAX = 200_000;
+    return {
+      issue: i,
+      attempt: a ?? null,
+      head_sha: a?.head_sha ?? null,
+      tree_sha,
+      stat,
+      diff: diff.length > MAX ? diff.slice(0, MAX) + "\n… diff cut at 200 KB" : diff,
+      runs: runs.map((r) => ({ ...r, detail: parse(r.detail, {}) })),
+      events: events.map((e) => ({ ...e, detail: parse(e.detail, {}) })),
+      questions,
+    };
+  }
+
   private async assertReviewable(key: string, headSha: string, treeSha: string) {
     const i = this.store.issue(key);
     if (!i) throw new FoundryError("NOT_FOUND", `No issue ${key}`);
