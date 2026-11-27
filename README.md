@@ -60,9 +60,28 @@ It installs the plugin's dependencies, type-checks, then installs Foundry into y
 (or reloads it if it's already there) and waits until Paseo reports it running. `PASEO_HOME` picks a
 daemon home other than `~/.paseo`. Paseo runs the plugin from this checkout, so keep it in place.
 
-Foundry appears in Paseo's sidebar. Its first screen lists your Paseo projects as cards; tap one to use it with Foundry (the key, name and base branch come from the repo). Then: the features overview, a feature's docs and approvals, the review
-panel for each task, Verify and Ship, and the project manager's chat with its cards. Open Settings →
-Foundry first.
+Foundry appears in Paseo's sidebar. On a first install it opens on a welcome guide:
+
+1. **Set up your agents** (required). For each of Foundry's profiles (builder, reviewer, planner, project
+   manager) pick a harness and a model from what Paseo has on this machine. Continue adds only the
+   missing profiles to Paseo's settings, plus a `foundry-<harness>` provider that hides Paseo's own agent
+   tools from Foundry's agents. Existing profiles are never changed.
+2. **Pick a project** from your Paseo projects. The first time, Foundry says what it will do in that repo
+   and waits for your yes.
+3. **Start a first feature.**
+
+Then: the features overview, a feature's docs and approvals, the review panel for each task, Verify and
+Ship, and the project manager's chat with its cards. After an update, a one-time What's new card lists
+the changes; a change to how Foundry acts on your code waits for Got it before those actions run. If its
+database can't be opened or upgraded, Foundry changes nothing and starts in safe mode, naming the backup.
+
+To test onboarding from scratch (development installs only):
+
+```sh
+scripts/dev-reset.sh             # show what a reset would remove
+scripts/dev-reset.sh --yes       # archive Foundry's workspaces, remove foundry-* profiles, empty its data (copied to /tmp), reload
+scripts/dev-reset.sh --sandbox   # a separate throwaway Paseo daemon with a fresh Foundry; your Paseo is untouched
+```
 
 Foundry keeps its data in `~/.foundry-paseo/foundry.db` (`FOUNDRY_HOME` moves it). It refuses a database that another program made, such as the older Go Foundry's `~/.foundry`, rather than change it.
 

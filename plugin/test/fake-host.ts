@@ -5,8 +5,8 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { sh } from "../server/core/git";
-import { PASEO_ORCHESTRATION_TOOLS } from "../server/core/setup";
-import type { AgentSpec, Host, HostFacts, ScriptResult, StartedAgent, TimelineData } from "../server/core/host";
+import { profilesPatch, removeProfilesPatch } from "../server/adapter/profiles";
+import type { AgentSpec, Harness, Host, HostFacts, ProfileChoice, ScriptResult, StartedAgent, TimelineData } from "../server/core/host";
 import type { Role } from "../server/core/model";
 import type { Store } from "../server/core/store";
 
@@ -203,19 +203,25 @@ export class FakeHost implements Host {
   async facts(): Promise<HostFacts> {
     return { profiles: this.profiles, providers: this.providers, mcpInjectIntoAgents: true, shell: "/bin/zsh", paseoVersion: "0.18.0" };
   }
-  async addMissingProfiles(o: { harness: string; workModel: string; pmModel: string }) {
-    const added: string[] = [];
-    const provider = `foundry-${o.harness}`;
-    if (!this.providers[provider]) {
-      this.providers[provider] = { disabledTools: [...PASEO_ORCHESTRATION_TOOLS] };
-      added.push(`provider ${provider}`);
-    }
-    for (const role of ["builder", "reviewer", "planner", "pm"]) {
-      const id = `foundry-${role}`;
-      if (this.profiles.some((p) => p.id === id)) continue;
-      this.profiles.push({ id, name: `Foundry ${role}`, provider, model: role === "pm" || role === "planner" ? o.pmModel : o.workModel });
-      added.push(id);
-    }
-    return added;
+  harnessList: Harness[] = [
+    { id: "claude", label: "Claude Code", status: "ready", models: [{ id: "claude-sonnet-5-5", label: "Sonnet", isDefault: true }, { id: "claude-opus-5-5", label: "Opus" }] },
+  ];
+  reloads = 0;
+  async harnesses() {
+    return this.harnessList;
+  }
+  async writeProfiles(choices: ProfileChoice[]) {
+    const { patch, added, created } = profilesPatch({ providers: this.providers, agentProfiles: this.profiles }, choices);
+    for (const [id, v] of Object.entries((patch.providers ?? {}) as Record<string, any>)) this.providers[id] = { disabledTools: v.paseoTools.disabledTools };
+    if (patch.agentProfiles) this.profiles = patch.agentProfiles as never;
+    return { added, created };
+  }
+  async removeProfiles(ids: string[]) {
+    const { patch, removed } = removeProfilesPatch({ agentProfiles: this.profiles }, ids);
+    if (patch.agentProfiles) this.profiles = patch.agentProfiles as never;
+    return removed;
+  }
+  async reloadSelf() {
+    this.reloads++;
   }
 }

@@ -93,10 +93,29 @@ export interface Host {
   notify(n: { title: string; body: string; key: string; screen?: string }): Promise<void>;
 
   facts(): Promise<HostFacts>;
+  /** The agent harnesses the host can run here, with their models, for the onboarding wizard. */
+  harnesses(): Promise<Harness[]>;
   /**
-   * Onboarding: add Foundry's role profiles (and the tool-restricted provider they run on) to the host's
-   * agent settings, only the ones that are missing. Never changes or removes an existing entry.
-   * Returns what was added.
+   * Onboarding: add Foundry's role profiles (and the tool-restricted provider each harness runs on) to the
+   * host's agent settings, only the ones that are missing. Never changes or removes an existing entry.
+   * Returns what was added, and each created entry as written.
    */
-  addMissingProfiles(o: { harness: string; workModel: string; pmModel: string }): Promise<string[]>;
+  writeProfiles(choices: ProfileChoice[]): Promise<{ added: string[]; created: { kind: "profile" | "provider"; id: string; value: unknown }[] }>;
+  /** Removes the named agent profiles; every other profile stays as it is. Returns the ids removed. */
+  removeProfiles(ids: string[]): Promise<string[]>;
+  /** Development only: ask the host to reload this plugin. */
+  reloadSelf(): Promise<void>;
+}
+
+export interface Harness {
+  id: string;
+  label: string;
+  status: string;
+  models: { id: string; label: string; isDefault?: boolean }[];
+}
+
+export interface ProfileChoice {
+  role: Role;
+  harness: string;
+  model: string;
 }

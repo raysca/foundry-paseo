@@ -6,11 +6,11 @@ import { resolve, sep } from "node:path";
 import type { PaseoApi } from "@getpaseo/client";
 import type { PluginServerContext, AgentToolDefinition } from "@getpaseo/plugin/server";
 import { DaemonClient } from "@getpaseo/client/internal/daemon-client";
-import type { AgentSpec, AgentStatus, Host, HostFacts, HostProfile, ScriptResult, StartedAgent, TimelineData } from "../core/host";
+import type { AgentSpec, AgentStatus, Harness, Host, HostFacts, HostProfile, ProfileChoice, ScriptResult, StartedAgent, TimelineData } from "../core/host";
 import type { Role } from "../core/model";
 import type { Store } from "../core/store";
 import { profileId, roleProfile } from "../core/setup";
-import { missingProfilesPatch, type ProfileOptions } from "./profiles";
+import { profilesPatch, removeProfilesPatch } from "./profiles";
 
 /** What the adapter reports back to Foundry's core. */
 export interface HostEvents {
@@ -143,12 +143,45 @@ export class PaseoAdapter implements Host {
     };
   }
 
-  async addMissingProfiles(o: ProfileOptions): Promise<string[]> {
+  async harnesses(): Promise<Harness[]> {
+    const providers = this.paseo.providers;
+    // Provider discovery is lazy in Paseo; wait a little for it, then take what is known.
+    const snap = (await Promise.race([
+      providers.waitForReady().catch(() => null),
+      new Promise((r) => setTimeout(() => r(null), 8000)),
+    ])) as { entries?: any[] } | null;
+    const entries = (snap ?? ((await providers.snapshot()) as { entries?: any[] })).entries ?? [];
+    return entries
+      .filter((e) => e.enabled !== false && !String(e.provider).startsWith("foundry-"))
+      .map((e) => ({
+        id: String(e.provider),
+        label: String(e.label ?? e.provider),
+        status: String(e.status),
+        models: ((e.models ?? []) as any[])
+          .filter((m) => m.isSelectable !== false)
+          .map((m) => ({ id: String(m.id), label: String(m.label ?? m.id), isDefault: !!m.isDefault })),
+      }));
+  }
+
+  async writeProfiles(choices: ProfileChoice[]) {
     const config = await this.daemonConfig();
     if (!config) throw new Error("Could not read Paseo's settings");
-    const { patch, added } = missingProfilesPatch(config as never, o);
+    const { patch, added, created } = profilesPatch(config as never, choices);
     if (added.length) await this.paseo.config.patch(patch as never);
-    return added;
+    return { added, created };
+  }
+
+  async removeProfiles(ids: string[]) {
+    const config = await this.daemonConfig();
+    if (!config) throw new Error("Could not read Paseo's settings");
+    const { patch, removed } = removeProfilesPatch(config as never, ids);
+    if (removed.length) await this.paseo.config.patch(patch as never);
+    return removed;
+  }
+
+  async reloadSelf() {
+    const c = await this.daemon();
+    await c.reloadPlugin("foundry");
   }
 
   private async profileFor(role: Role, override?: string | null): Promise<HostProfile> {

@@ -32,7 +32,8 @@ sleep 3
 fsetup | python3 -c "import json,sys;d=json.load(sys.stdin);f=d['findings'];assert any(x['code']=='PROFILE_MISSING' and 'foundry-reviewer' in x['message'] for x in f), f;print('missing profile reported')"
 
 log "onboarding creates the missing profile and keeps the others"
-fact setup.create_profiles | python3 -c "import json,sys;d=json.load(sys.stdin);print(d.get('added'));assert any('foundry-reviewer' in a for a in d['added']), d;assert not [x for x in d['setup']['findings'] if x['level']=='error'], d['setup']"
+fact setup.harnesses | python3 -c "import json,sys;d=json.load(sys.stdin);print('harnesses:', [(h['id'], h['status'], len(h['models'])) for h in d]);assert isinstance(d, list) and d, d"
+fact setup.create_profiles '{"choices":[{"role":"reviewer","harness":"claude","model":"claude-sonnet-5-5"}]}' | python3 -c "import json,sys;d=json.load(sys.stdin);print(d.get('added'));assert any('foundry-reviewer' in a for a in d['added']), d;assert not [x for x in d['setup']['findings'] if x['level']=='error'], d['setup']"
 python3 - "$PHOME/config.json" <<'PY'
 import json, sys
 ps = {x["id"]: x for x in json.load(open(sys.argv[1]))["daemon"]["agentProfiles"]}
@@ -40,5 +41,19 @@ assert ps["users-own"]["model"] == "keep-me", ps
 assert "foundry-reviewer" in ps and "foundry-builder" in ps, ps
 print("profiles:", sorted(ps))
 PY
-fact setup.create_profiles | python3 -c "import json,sys;d=json.load(sys.stdin);assert d['added']==[], d;print('second run adds nothing')"
+fact setup.create_profiles '{"choices":[{"role":"reviewer","harness":"claude","model":"other"}]}' | python3 -c "import json,sys;d=json.load(sys.stdin);assert d['added']==[], d;print('second run adds nothing')"
+fact project.adopt "{\"repo\":\"$WORK/repo\"}" | python3 -c "import json,sys;d=json.load(sys.stdin);assert d['error']['code']=='ACK_REQUIRED', d;print('adopt without the notice refused')"
+
+log "install is recorded, and a dev reset brings back a fresh install"
+q "o=d['onboarding'];assert o['installed_version']==o['version'], o;print('installed', o['version'])"
+fact dev.reset_plan | python3 -c "import json,sys;d=json.load(sys.stdin);print(d);assert 'foundry-builder' in d['profiles'], d"
+fact dev.reset '{"confirm":"reset"}' | python3 -c "import json,sys;d=json.load(sys.stdin);print(d);assert 'foundry-builder' in d['removed'], d"
+sleep 4
+wait_for "d['projects']==[] and d['onboarding']['welcome_dismissed']==False and d['onboarding']['installed_version'] is not None" 60 "Foundry reloaded empty, as a first install"
+python3 - "$PHOME/config.json" <<'PY'
+import json, sys
+ps = [x["id"] for x in json.load(open(sys.argv[1]))["daemon"]["agentProfiles"]]
+assert ps == ["users-own"], ps
+print("profiles left:", ps)
+PY
 log "smoke passed"
