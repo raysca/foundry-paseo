@@ -23,10 +23,22 @@ python3 - "$PHOME/config.json" <<'PY'
 import json, sys
 p = sys.argv[1]; c = json.load(open(p))
 c["daemon"]["agentProfiles"] = [x for x in c["daemon"]["agentProfiles"] if x["id"] != "foundry-reviewer"]
+c["daemon"]["agentProfiles"].append({"id": "users-own", "name": "Mine", "provider": "claude", "model": "keep-me"})
 json.dump(c, open(p, "w"), indent=2)
 PY
 P daemon restart >/dev/null 2>&1 || (stop_daemon; P start --timeout 300 >/dev/null)
 wait_for "True" 30 "daemon back" || true
 sleep 3
 fsetup | python3 -c "import json,sys;d=json.load(sys.stdin);f=d['findings'];assert any(x['code']=='PROFILE_MISSING' and 'foundry-reviewer' in x['message'] for x in f), f;print('missing profile reported')"
+
+log "onboarding creates the missing profile and keeps the others"
+fact setup.create_profiles | python3 -c "import json,sys;d=json.load(sys.stdin);print(d.get('added'));assert any('foundry-reviewer' in a for a in d['added']), d;assert not [x for x in d['setup']['findings'] if x['level']=='error'], d['setup']"
+python3 - "$PHOME/config.json" <<'PY'
+import json, sys
+ps = {x["id"]: x for x in json.load(open(sys.argv[1]))["daemon"]["agentProfiles"]}
+assert ps["users-own"]["model"] == "keep-me", ps
+assert "foundry-reviewer" in ps and "foundry-builder" in ps, ps
+print("profiles:", sorted(ps))
+PY
+fact setup.create_profiles | python3 -c "import json,sys;d=json.load(sys.stdin);assert d['added']==[], d;print('second run adds nothing')"
 log "smoke passed"

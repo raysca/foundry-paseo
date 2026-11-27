@@ -2,7 +2,7 @@
 // computed from its tasks, what waits on you, and a form for a new feature.
 import type { PluginScreenProps, ProjectRef } from "@getpaseo/plugin/client";
 import { useProject, useProjects } from "@getpaseo/plugin/client";
-import { Loading, ScrollView } from "@getpaseo/plugin/client/ui";
+import { Loading, ScrollView, useToast } from "@getpaseo/plugin/client/ui";
 import { useState } from "react";
 import { View } from "react-native";
 import { Badge, Btn, Card, Choice, Empty, Field, go, Page, Progress, Row, SCREEN, Section, T, Themed, useAct, useFoundry, type State } from "./kit";
@@ -83,10 +83,13 @@ function FeatureCard({ r }: { r: any }) {
 function Setup({ setup }: { setup: any }) {
   const bad = (setup?.findings ?? []).filter((f: any) => f.level === "error" || f.level === "warn");
   if (!bad.length) return null;
+  const missing = bad.filter((f: any) => f.code === "PROFILE_MISSING");
+  const rest = bad.filter((f: any) => f.code !== "PROFILE_MISSING");
   return (
     <Card>
-      <T bold>Setup needs attention</T>
-      {bad.map((f: any) => (
+      <T bold>{missing.length ? "Finish setting up Foundry" : "Setup needs attention"}</T>
+      {missing.length ? <CreateProfiles /> : null}
+      {rest.map((f: any) => (
         <T key={f.code} size={13}>
           {f.message}
           {f.fix ? ` ${f.fix}` : ""}
@@ -94,6 +97,32 @@ function Setup({ setup }: { setup: any }) {
       ))}
       <T muted size={12}>Settings → Foundry runs the check again.</T>
     </Card>
+  );
+}
+
+/** Onboarding: one tap adds the Paseo agent profiles Foundry's roles run on. */
+export function CreateProfiles() {
+  const act = useAct();
+  const toast = useToast();
+  return (
+    <>
+      <T size={13}>
+        Foundry's roles run on Paseo agent profiles: foundry-builder and foundry-reviewer (Claude Sonnet), foundry-planner
+        and foundry-pm (Claude Opus), on a foundry-claude provider that hides Paseo's own agent tools from them. Only the
+        missing ones are added; profiles you already have are never changed. You can change models later in Paseo's settings.
+      </T>
+      <Row>
+        <Btn
+          label={act.pending ? "Creating…" : "Create Foundry's profiles"}
+          kind="primary"
+          disabled={act.pending}
+          onPress={async () => {
+            const r = await act.run("setup.create_profiles");
+            if (r) toast.show(r.added?.length ? `Added ${r.added.length}: ${r.added.join(", ")}` : "Nothing to add; all profiles exist.");
+          }}
+        />
+      </Row>
+    </>
   );
 }
 

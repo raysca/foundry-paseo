@@ -112,6 +112,17 @@ export class Foundry {
     this.store.event("setup_checked", { detail: { ready: setupReady(findings), errors: findings.filter((f) => f.level === "error").map((f) => f.code) } });
     return this.lastSetup;
   }
+  /** Onboarding: adds whichever foundry-* profiles (and the foundry-<harness> provider) are missing in
+   *  Paseo's settings. Existing profiles are never changed; models can be edited in Paseo afterwards. */
+  async createProfiles(o: { harness?: string; workModel?: string; pmModel?: string } = {}) {
+    const added = await this.host.addMissingProfiles({
+      harness: o.harness ?? "claude",
+      workModel: o.workModel ?? "claude-sonnet-5-5",
+      pmModel: o.pmModel ?? "claude-opus-5-5",
+    });
+    this.store.event("profiles_created", { actor: "you", detail: { added } });
+    return { added, setup: await this.runSetupCheck() };
+  }
   setupStatus() {
     return this.lastSetup;
   }

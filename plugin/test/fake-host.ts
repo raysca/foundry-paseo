@@ -5,6 +5,7 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { sh } from "../server/core/git";
+import { PASEO_ORCHESTRATION_TOOLS } from "../server/core/setup";
 import type { AgentSpec, Host, HostFacts, ScriptResult, StartedAgent, TimelineData } from "../server/core/host";
 import type { Role } from "../server/core/model";
 import type { Store } from "../server/core/store";
@@ -197,7 +198,24 @@ export class FakeHost implements Host {
   async notify(n: { title: string; body: string; key: string }) {
     this.notifications.push({ title: n.title, key: n.key });
   }
+  profiles: { id: string; name: string; provider: string; model?: string }[] = [];
+  providers: Record<string, { disabledTools: string[] }> = {};
   async facts(): Promise<HostFacts> {
-    return { profiles: [], providers: {}, mcpInjectIntoAgents: true, shell: "/bin/zsh", paseoVersion: "0.18.0" };
+    return { profiles: this.profiles, providers: this.providers, mcpInjectIntoAgents: true, shell: "/bin/zsh", paseoVersion: "0.18.0" };
+  }
+  async addMissingProfiles(o: { harness: string; workModel: string; pmModel: string }) {
+    const added: string[] = [];
+    const provider = `foundry-${o.harness}`;
+    if (!this.providers[provider]) {
+      this.providers[provider] = { disabledTools: [...PASEO_ORCHESTRATION_TOOLS] };
+      added.push(`provider ${provider}`);
+    }
+    for (const role of ["builder", "reviewer", "planner", "pm"]) {
+      const id = `foundry-${role}`;
+      if (this.profiles.some((p) => p.id === id)) continue;
+      this.profiles.push({ id, name: `Foundry ${role}`, provider, model: role === "pm" || role === "planner" ? o.pmModel : o.workModel });
+      added.push(id);
+    }
+    return added;
   }
 }

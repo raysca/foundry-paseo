@@ -111,6 +111,8 @@ export default function contribute(server: PluginServerContext) {
           return adoptRepo(store, { repo: String(args.repo ?? ""), name: args.name ? String(args.name) : undefined });
         case "setup.check":
           return foundry.runSetupCheck();
+        case "setup.create_profiles":
+          return foundry.createProfiles();
         case "issue.start":
           return foundry.startIssue(String(args.key));
         case "issue.accept":
