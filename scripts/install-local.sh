@@ -10,16 +10,25 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PLUGIN="$ROOT/plugin"
 PASEO_BIN="${PASEO_BIN:-paseo}"
-HOME_ARGS=()
-[ -n "${PASEO_HOME:-}" ] && HOME_ARGS=(--home "$PASEO_HOME")
-P() { "$PASEO_BIN" "${HOME_ARGS[@]}" "$@"; }
+# No arrays: macOS ships bash 3.2, where an empty "${a[@]}" under set -u kills the script silently.
+P() {
+  if [ -n "${PASEO_HOME:-}" ]; then "$PASEO_BIN" --home "$PASEO_HOME" "$@"; else "$PASEO_BIN" "$@"; fi
+}
+trap 'rc=$?; [ $rc -eq 0 ] || printf "install-local: stopped (exit code %s); the step above it failed\n" "$rc" >&2' EXIT
 say() { printf '\033[1m%s\033[0m\n' "$*"; }
 die() { printf 'install-local: %s\n' "$*" >&2; exit 1; }
 
 command -v "$PASEO_BIN" >/dev/null || die "no paseo CLI found. Install Paseo, or set PASEO_BIN to its CLI."
 command -v node >/dev/null || die "Node.js is needed (22 or newer)."
 node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 22 ? 0 : 1)' || die "Node.js 22 or newer is needed (node:sqlite); found $(node -v)."
-P daemon status >/dev/null 2>&1 || die "your Paseo daemon isn't running. Open Paseo (or run: $PASEO_BIN daemon start) and try again."
+# Foundry needs the Paseo version named in plugin/paseo-plugin.json (requirements.paseo).
+NEED="$(node -e 'const r=require(process.argv[1]).requirements?.paseo??"";process.stdout.write(r.replace(/^[^0-9]*/,""))' "$PLUGIN/paseo-plugin.json")"
+HAVE="$("$PASEO_BIN" --version 2>/dev/null | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
+if [ -n "$NEED" ] && [ -n "$HAVE" ]; then
+  node -e 'const [h,n]=process.argv.slice(1).map(v=>v.split(".").map(Number));for(let i=0;i<3;i++){if(h[i]!==n[i])process.exit(h[i]>n[i]?0:1)}' "$HAVE" "$NEED" \
+    || die "Foundry needs Paseo $NEED or newer, and this Paseo is $HAVE. Update the Paseo app (it updates the CLI and daemon), then run this again."
+fi
+P plugin ls >/dev/null 2>&1 || die "your Paseo daemon isn't running. Open Paseo (or run: $PASEO_BIN daemon start) and try again."
 
 if [ "${1:-}" = "--pull" ]; then
   say "Pulling the latest code"
