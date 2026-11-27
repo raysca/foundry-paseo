@@ -104,21 +104,24 @@ export function buildTools(f: Foundry): ToolSet {
     name: "propose_tasks",
     title: "Propose the task graph",
     description:
-      "Hand Foundry the feature's task graph. Foundry validates it (coverage of every requirement, no cycles, valid dependencies), writes tasks.md and returns waves, the critical path and warnings. Errors come back to fix; nothing is recorded until it passes.",
+      "Hand Foundry the feature's task graph. Foundry validates it (coverage of every requirement, no cycles, valid dependencies), writes tasks.md and returns waves, the critical path and warnings. Errors come back to fix; nothing is recorded until it passes. After a spec change, the same tool takes the change set: every existing task by issue key with a tag (keep, update, flag, cancel), plus new tasks by ref (new, followup, removal).",
     input: z.object({
       tasks: z.array(
         z.object({
-          ref: z.string(),
-          title: z.string(),
+          ref: z.string().default(""),
+          title: z.string().default(""),
           description: z.string().optional(),
           exit_criteria: z.string().optional(),
-          requirement_refs: z.array(z.string()),
+          requirement_refs: z.array(z.string()).default([]),
           depends_on: z.array(z.object({ ref: z.string(), reason: z.string() })).optional(),
           touches: z.array(z.string()).optional(),
           size: z.enum(["S", "M", "L"]).optional(),
           loop: z.string().optional(),
           checks: z.object({ scripts: z.array(z.string()).optional(), paths: z.array(z.string()).optional() }).optional(),
           profile: z.string().optional(),
+          // Change sets (after a spec change): the existing issue an entry is about, and what happens to it.
+          issue: z.string().optional(),
+          tag: z.enum(["keep", "update", "flag", "cancel", "new", "followup", "removal"]).optional(),
         }),
       ),
     }),

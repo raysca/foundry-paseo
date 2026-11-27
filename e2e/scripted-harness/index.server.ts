@@ -194,6 +194,7 @@ async function script(s: Session, text: string): Promise<string> {
     write(cwd, "tests/test_core.py", "import unittest\n\nfrom shout.core import shout\n\n\nclass ShoutTest(unittest.TestCase):\n    def test_shout(self):\n        self.assertEqual(shout(\"hi\"), \"HI!\")\n");
     return "Added shout() with a test.";
   }
+  if (task && /--loud/.test(task[2]!)) return implementLoud(cwd);
   if ((task && /flag/.test(task[2]!)) || text.includes("ask me again")) {
     const ans = await call(s, "ask_human", { question: "Should the --shout flag also accept -s?" });
     if (ans.startsWith("Your question is waiting")) return "Stopped: waiting for the developer on -s.";
@@ -211,6 +212,22 @@ async function script(s: Session, text: string): Promise<string> {
 
 async function plan(s: Session, dir: string, text: string): Promise<string> {
   const cwd = s.config.cwd;
+  // A spec change during Build: first the requirements as they now stand, then one change set.
+  if (text.includes("The developer edited")) {
+    const r = await call(s, "propose_requirements", { requirements: [...SHOUT_REQS, LOUD_REQ] });
+    return `Requirements updated. ${r}`;
+  }
+  if (text.includes("approved a changed spec")) {
+    const keys = [...text.matchAll(/^- (\S+-\d+) \[(\w+)\]/gm)].map((m) => m[1]!);
+    const last = keys[keys.length - 1]!;
+    const r = await call(s, "propose_tasks", {
+      tasks: [
+        ...keys.map((issue) => ({ issue, tag: "keep" })),
+        { ref: "N1", tag: "new", title: "Add --loud alias to the CLI with a test", requirement_refs: ["R3"], depends_on: [{ ref: last, reason: "extends its flag handling" }], touches: ["shout/cli.py"], size: "S" },
+      ],
+    });
+    return `Proposed the change set. ${r}`;
+  }
   if (text.includes("call propose_tasks")) {
     const r = await call(s, "propose_tasks", {
       tasks: [
@@ -241,15 +258,24 @@ async function plan(s: Session, dir: string, text: string): Promise<string> {
       `${dir}/spec.md`,
       "# Shout mode\n\n## Goal\nLet the CLI shout.\n\n## User stories\nAs a user I can shout.\n\n## Requirements\n\nR1 Shout\n- WHEN shout(text) is called THE library SHALL return text upper-cased with ! appended\n\nR2 CLI flag\n- WHERE --shout is given THE CLI SHALL print the shouted text\n\n## Out of scope\nWhispering.\n\n## Decisions\n- See the answers.\n",
     );
-    const r = await call(s, "propose_requirements", {
-      requirements: [
-        { ref: "R1", title: "Shout", acceptance_criteria: ["WHEN shout(text) is called THE library SHALL return text upper-cased with ! appended"] },
-        { ref: "R2", title: "CLI flag", acceptance_criteria: ["WHERE --shout is given THE CLI SHALL print the shouted text"] },
-      ],
-    });
+    const r = await call(s, "propose_requirements", { requirements: SHOUT_REQS });
     return `Wrote spec.md. ${r}`;
   }
   return `planner echo: ${text.slice(0, 80)}`;
+}
+
+const SHOUT_REQS = [
+  { ref: "R1", title: "Shout", acceptance_criteria: ["WHEN shout(text) is called THE library SHALL return text upper-cased with ! appended"] },
+  { ref: "R2", title: "CLI flag", acceptance_criteria: ["WHERE --shout is given THE CLI SHALL print the shouted text"] },
+];
+const LOUD_REQ = { ref: "R3", title: "Loud alias", acceptance_criteria: ["WHERE --loud is given THE CLI SHALL behave as with --shout"] };
+
+function implementLoud(cwd: string) {
+  const p = join(cwd, "shout/cli.py");
+  const src = readFileSync(p, "utf8").replace(/\("--shout"/g, '("--shout", "--loud"');
+  writeFileSync(p, src);
+  write(cwd, "tests/test_cli_loud.py", `import io\nimport unittest\nfrom contextlib import redirect_stdout\n\nfrom shout import cli\n\n\nclass LoudTest(unittest.TestCase):\n    def test_loud(self):\n        buf = io.StringIO()\n        with redirect_stdout(buf):\n            cli.main(["--loud", "hi"])\n        self.assertEqual(buf.getvalue().strip(), "HI!")\n`);
+  return "Added --loud as an alias of --shout, with a test.";
 }
 
 function implementB(cwd: string, answer: string) {
@@ -263,5 +289,3 @@ function implementB(cwd: string, answer: string) {
   write(cwd, "tests/test_cli_shout.py", `import io\nimport unittest\nfrom contextlib import redirect_stdout\n\nfrom shout import cli\n\n\nclass ShoutFlagTest(unittest.TestCase):\n    def test_flag(self):\n        buf = io.StringIO()\n        with redirect_stdout(buf):\n            cli.main(["--shout", "hi"])\n        self.assertEqual(buf.getvalue().strip(), "HI!")\n`);
   return `Added --shout${short ? " and -s" : ""} with a test.`;
 }
-// keep readFileSync referenced for future scripted reads
-void readFileSync;
