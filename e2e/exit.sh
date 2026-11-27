@@ -80,23 +80,34 @@ text=d['text'].replace('## Out of scope', 'Also: --loud is an alias of --shout.\
 print(json.dumps({'id':$FID,'kind':'spec','text':text,'base_sha':d['sha']}))")
 fact feature.edit_doc "$EDIT" | ok "spec edited"
 q "f=$(feat); assert f['spec_change_open']==1, f; print('spec change open')"
-wait_for "len($(newref))==1 and any(x['feature_id']==$FID and x['kind']=='spec' and x['status']=='in_review' for x in d['docs'])" $((120*X)) "PM restated the requirements (one added)"
-NEW=$(q "print($(newref)[0])")
-[ $REAL = 1 ] || [ "$NEW" = "R3" ]
-log "added $NEW"
-git -C "$WORK/repo" show "foundry/feature/shout-mode:.foundry/features/shout-mode/spec.md" | grep "### $NEW " >/dev/null
+if [ $REAL = 1 ]; then
+  # A real PM may add a requirement or fold --loud into existing ones; both are fair readings of the edit.
+  wait_for "(len($(newref))>=1 or any(r['feature_id']==$FID and '--loud' in r['criteria'] for r in d['requirements'])) and any(x['feature_id']==$FID and x['kind']=='spec' and x['status']=='in_review' for x in d['docs'])" 600 "PM restated the requirements (--loud added or folded in)"
+  NEW=$(q "print(($(newref) or [''])[0])")
+else
+  wait_for "len($(newref))==1 and any(x['feature_id']==$FID and x['kind']=='spec' and x['status']=='in_review' for x in d['docs'])" 120 "PM restated the requirements (one added)"
+  NEW=$(q "print($(newref)[0])")
+  [ "$NEW" = "R3" ]
+fi
+if [ -n "$NEW" ]; then
+  log "added $NEW"
+  git -C "$WORK/repo" show "foundry/feature/shout-mode:.foundry/features/shout-mode/spec.md" | grep "### $NEW " >/dev/null
+else
+  log "--loud folded into existing requirements: $(q "print(' '.join(r['ref'] for r in d['requirements'] if r['feature_id']==$FID and '--loud' in r['criteria']))")"
+fi
 
 log "approve the changed spec; the PM proposes one change set"
 fact feature.approve_spec "{\"id\":$FID,\"sha\":\"$(docsha spec)\"}" | ok "changed spec approved"
 wait_for "any(p['feature_id']==$FID and p['status']=='proposed' and p['kind']=='change' for p in d['proposals'])" $((120*X)) "change set proposed"
 PROP=$(q "print([p['id'] for p in d['proposals'] if p['feature_id']==$FID and p['status']=='proposed'][0])")
 fact feature.approve_tasks "{\"id\":$FID,\"proposal\":$PROP,\"sha\":\"$(docsha tasks)\"}" | ok "change set approved"
-q "f=$(feat); assert f['spec_change_open']==0 and f['stage']=='build', f; i=[i for i in d['issues'] if i['feature_id']==$FID and '\"$NEW\"' in i['requirement_refs']]; assert i, 'nothing covers $NEW'; print(i[0]['key'], 'covers $NEW')"
+q "f=$(feat); assert f['spec_change_open']==0 and f['stage']=='build', f; print('change set applied')"
+q "import json; print('change set:', json.loads([p for p in d['proposals'] if p['id']==$PROP][0]['tasks']))" 2>/dev/null || true
+[ -z "$NEW" ] || q "i=[i for i in d['issues'] if i['feature_id']==$FID and '\"$NEW\"' in i['requirement_refs']]; assert i, 'nothing covers $NEW'; print(i[0]['key'], 'covers $NEW')"
 
-if [ $REAL = 1 ]; then
-  log "every task runs and is accepted (questions get 'use your recommendation')"
-  # Answer any question, accept whatever reaches review, until every task of the feature is Done.
-  left() { q "print(sum(1 for i in d['issues'] if i['feature_id']==$FID and i['status'] not in ('Done','Cancelled')))"; }
+# Real agents: answer any question, accept whatever reaches review, until every task of the feature is Done.
+left() { q "print(sum(1 for i in d['issues'] if i['feature_id']==$FID and i['status'] not in ('Done','Cancelled')))"; }
+build_all() {
   for _ in $(seq 1 360); do
     [ "$(left)" = "0" ] && break
     for QID in $(q "print(' '.join(str(x['id']) for x in d['questions'] if x['issue_key'] and x['status'] in ('live','waiting')))"); do
@@ -106,6 +117,10 @@ if [ $REAL = 1 ]; then
     sleep 5
   done
   [ "$(left)" = "0" ] || { log "TIMEOUT: tasks still open"; exit 1; }
+}
+if [ $REAL = 1 ]; then
+  log "every task runs and is accepted (questions get 'use your recommendation')"
+  build_all
 else
   log "SHT-2 resumes with the answer; SHT-3 runs after it"
   QID=$(q "print([x['id'] for x in d['questions'] if x['issue_key']=='SHT-2'][0])")
@@ -120,7 +135,19 @@ verif() { echo "[v for v in d['verifications'] if v['feature_id']==$FID][0]"; }
 log "Build ends: Verify in a fresh workspace (fail_once fails there), the reviewer reports R1 to R3"
 wait_for "len([v for v in d['verifications'] if v['feature_id']==$FID]) and $(verif)['status']!='running'" $((300*X)) "Verify done"
 if [ $REAL = 1 ]; then
-  q "import json; v=$(verif); print('Verify:', v['status'], v['failure'], [(c['name'],c['status']) for c in json.loads(v['checks'])], [(r['requirement_ref'],r['passed']) for r in json.loads(v['requirements'])])"
+  vshow() { q "import json; v=$(verif); print('Verify:', v['status'], v['failure'], [(c['name'],c['status']) for c in json.loads(v['checks'])], [(r['requirement_ref'],r['passed']) for r in json.loads(v['requirements'])])"; }
+  vshow
+  # A requirement the reviewer failed becomes a task (back to Build), then Verify runs again; at most twice.
+  for _ in 1 2; do
+    REFS=$(q "import json; v=$(verif); print(' '.join(r['requirement_ref'] for r in json.loads(v['requirements']) if not r['passed']) if v['failure']=='REQUIREMENTS_FAILED' else '')")
+    [ -n "$REFS" ] || break
+    N=$(q "print(len([v for v in d['verifications'] if v['feature_id']==$FID]))")
+    ARGS=$(q "import json; v=$(verif); bad=[r for r in json.loads(v['requirements']) if not r['passed']]; print(json.dumps({'id':$FID,'title':'Meet '+', '.join(r['requirement_ref'] for r in bad)+' (from Verify)','description':'\n'.join(r['requirement_ref']+': '+r['evidence'] for r in bad),'requirement_refs':[r['requirement_ref'] for r in bad]}))")
+    fact feature.task_from_failure "$ARGS" | ok "turned the failed requirements ($REFS) into a task"
+    build_all
+    wait_for "len([v for v in d['verifications'] if v['feature_id']==$FID])>$N and $(verif)['status']!='running'" 1500 "Verify ran again"
+    vshow
+  done
   q "import sys; sys.exit(0 if $(verif)['status']=='failed' else 1)" && fact feature.ship_with_gaps "{\"id\":$FID}" | ok "shipping with the gaps"
 else
   q "import json; v=$(verif); assert v['failure']=='CHECKS_FAILED', v; assert sorted(r['requirement_ref'] for r in json.loads(v['requirements']))==['R1','R2','R3'], v; print('CHECKS_FAILED (fail_once); requirements R1 R2 R3 reported')"
