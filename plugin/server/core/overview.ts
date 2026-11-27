@@ -5,6 +5,7 @@ import { parse, type Feature, type Issue, type Store } from "./store";
 
 export interface FeatureRow {
   id: number;
+  project_id: number;
   title: string;
   slug: string;
   stage: string;
@@ -68,6 +69,7 @@ export function featureRow(store: Store, f: Feature): FeatureRow {
   const delivery = deliveryLabel(store, f);
   return {
     id: f.id,
+    project_id: f.project_id,
     title: f.title,
     slug: f.slug,
     stage: f.stage,

@@ -215,3 +215,16 @@ test("a Verify reviewer that reports nothing fails Verify; a restart verifies an
   assert.deepEqual(rows.map((r) => r.failure ?? r.status), ["INTERRUPTED", "passed"]);
   assert.equal(store.feature(fid)!.stage, "ship");
 });
+
+test("the review panel's data: the diff against the feature head at the SHAs accept takes", async () => {
+  const { store, foundry } = await lastTaskInReview();
+  const r = await foundry.tasks.review("SHT-2");
+  const a = store.latestAttempt("SHT-2")!;
+  assert.equal(r.head_sha, a.head_sha);
+  assert.equal(r.tree_sha, a.tree_sha);
+  assert.match(r.diff, /work-2\.txt/);
+  assert.doesNotMatch(r.diff, /work-1\.txt/, "SHT-1's work is already on the feature head");
+  assert.ok(r.runs.some((x) => x.kind === "review"));
+  await foundry.accept("SHT-2", r.head_sha!, r.tree_sha!);
+  assert.equal(store.issue("SHT-2")!.status, "Done");
+});

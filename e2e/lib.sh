@@ -50,6 +50,9 @@ d["listen"] = f"127.0.0.1:{port}"
 d["relay"] = {"enabled": False}
 d["mcp"] = {"enabled": True, "injectIntoAgents": True}
 c["pluginsEnabled"] = True
+if os.environ.get("WEB_UI") == "1":
+    # Paseo's web app on the daemon's port, for the screens test (e2e/ui.sh).
+    c["features"] = {"webUi": {"enabled": True}}
 prov = c.setdefault("agents", {}).setdefault("providers", {})
 if harness == "scripted":
     # `extends` doesn't work for plugin providers (scorecard), so the tools are disabled on "scripted" itself.

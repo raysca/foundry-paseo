@@ -46,15 +46,22 @@ HARNESS=claude bash e2e/smoke.sh  # real Claude Code, on a Mac
 bash e2e/loop2.sh                 # loop 2: two tasks through checks, review, a question and accept; PM chat and a card
 bash e2e/loop1.sh                 # loop 1: idea to approved task list, its tasks, Verify, then Ship by local merge
 bash e2e/exit.sh                  # M1 exit test: loop 1 with a spec edit during Build, through Verify and Ship
+bash e2e/ui.sh                    # the same scenario clicked through Foundry's screens in Paseo's web app (needs Playwright)
 ```
 
 ## Install on your own Paseo
 
 ```sh
-cd plugin && npm install
-paseo plugin install "$PWD"
+scripts/install-local.sh          # install, or update and reload after you pull
+scripts/install-local.sh --pull   # git pull --ff-only first
 ```
 
-Then open Settings → Foundry in Paseo. The setup check lists anything missing (role profiles, a
+It installs the plugin's dependencies, type-checks, then installs Foundry into your running Paseo
+(or reloads it if it's already there) and waits until Paseo reports it running. `PASEO_HOME` picks a
+daemon home other than `~/.paseo`. Paseo runs the plugin from this checkout, so keep it in place.
+
+Foundry appears in Paseo's sidebar: the features overview, a feature's docs and approvals, the review
+panel for each task, Verify and Ship, and the project manager's chat with its cards. Open Settings →
+Foundry first. The setup check lists anything missing (role profiles, a
 provider that leaves Paseo's orchestration tools on, MCP injection off, a daemon shell that isn't zsh)
 and how to fix it.

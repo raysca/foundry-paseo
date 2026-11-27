@@ -94,6 +94,7 @@ export default function contribute(server: PluginServerContext) {
       verifications: store.all("SELECT * FROM verifications WHERE id IN (SELECT MAX(id) FROM verifications GROUP BY feature_id)"),
       chat: store.all("SELECT * FROM (SELECT * FROM chat ORDER BY id DESC LIMIT 300) ORDER BY id"),
       cards: store.all("SELECT * FROM cards ORDER BY id DESC LIMIT 100"),
+      pm_threads: store.all("SELECT project_id, thread, busy, last_turn_at FROM pm_threads"),
       ships: store.all("SELECT key, value FROM settings WHERE key LIKE 'ship:%' AND value<>''"),
       events: store.events({ limit: 200 }),
     })),
@@ -112,6 +113,8 @@ export default function contribute(server: PluginServerContext) {
           return foundry.accept(String(args.key), String(args.head_sha), String(args.tree_sha), "you", String(args.feedback ?? ""));
         case "issue.rework":
           return foundry.tasks.rework(String(args.key), String(args.head_sha), String(args.tree_sha), String(args.feedback ?? ""));
+        case "issue.review":
+          return foundry.tasks.review(String(args.key));
         case "issue.followup":
           return foundry.tasks.followUp(String(args.key), String(args.text ?? ""));
         case "feature.create":
