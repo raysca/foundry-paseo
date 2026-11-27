@@ -2,11 +2,11 @@
 // integration worktree; Foundry validates, commits, guards and moves stages. Every approval names the
 // exact commit you read.
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { ensureIntegration, featureDir, steering, uniqueSlug } from "./features";
 import { changedPaths, commitAll, FOUNDRY_IDENT, git, head, HOST_IDENT, PM_IDENT, sh } from "./git";
-import { lintRequirements, renderTasks, validateTasks, type GraphResult, type ProposedRequirement, type ProposedTask } from "./graph";
+import { diffRequirements, lintRequirements, renumbered, validateChangeSet, type RequirementDiff, renderRequirements, withRequirements, renderTasks, validateTasks, type GraphResult, type ProposedRequirement, type ProposedTask } from "./graph";
 import type { Host } from "./host";
 import type { Locks } from "./locks";
 import { FoundryError, TERMINAL_STATUSES, type Actor, type DocKind, type FeatureStage } from "./model";
@@ -30,10 +30,13 @@ const DOC_FILES: Record<DocKind, string> = { spec: "spec.md", plan: "plan.md", t
 const END_TURN =
   "The developer hasn't answered yet. End your turn now without writing the spec; the answers will arrive as your next message.";
 
+/** What a planning turn is for: a stage's step, or one of the two turns of a spec change. */
+type TurnKind = FeatureStage | "spec_change" | "change_set";
+
 interface Turn {
   agentId: string;
   runId: number;
-  stage: FeatureStage;
+  stage: TurnKind;
   timer: NodeJS.Timeout | null;
 }
 
@@ -113,8 +116,8 @@ export class Planning {
 
   private specSteps(dir: string) {
     return [
-      `Step 2, Spec: write ${dir}/spec.md with ## Goal, ## User stories, ## Requirements (numbered R1, R2, … each with EARS acceptance criteria, one per line), ## Out of scope and ## Decisions (include the developer's answers).`,
-      "Call propose_requirements with the same requirements. If it returns errors, fix them and call it again.",
+      `Step 2, Spec: write ${dir}/spec.md with ## Goal, ## User stories, ## Requirements, ## Out of scope and ## Decisions (include the developer's answers).`,
+      "Call propose_requirements with the requirements (refs R1, R2, …, each with EARS acceptance criteria). If it returns errors, fix them and call it again. Foundry writes the ## Requirements section of spec.md from them, so leave that section to Foundry.",
       "Then analyse the requirements for ambiguity, conflicts and gaps, and put the findings under ## Analysis. End your turn.",
     ].join("\n");
   }
@@ -134,7 +137,7 @@ export class Planning {
   }
 
   /** Start (or continue) the feature's planning session. Refused while a turn runs. */
-  private async runTurn(featureId: number, stage: FeatureStage, message: string) {
+  private async runTurn(featureId: number, stage: TurnKind, message: string) {
     await this.locks.with(`feature:${featureId}`, async () => {
       if (this.turns.has(featureId)) throw new FoundryError("FEATURE_BUSY", "The project manager is working on this feature");
       await this.beforeStart();
@@ -219,12 +222,23 @@ export class Planning {
       else rmSync(join(path, p), { force: true, recursive: true });
       reverted.push(p);
     }
+    this.syncRequirements(f);
     const commit = await commitAll(path, `${f.slug}: ${what}`, ident);
     if (commit) {
       this.store.updateFeature(f.id, { head_sha: commit });
       await this.trackDocs(f.id, base, commit);
     }
     return { reverted, commit };
+  }
+
+  /** Rewrite spec.md's Requirements section from the requirements Foundry holds (the database is the source of truth). */
+  private syncRequirements(f: Feature) {
+    const file = join(f.integration_path!, featureDir(f.slug), DOC_FILES.spec);
+    const reqs = this.store.requirements(f.id);
+    if (!existsSync(file) || !reqs.length) return;
+    const doc = readFileSync(file, "utf8");
+    const next = withRequirements(doc, renderRequirements(reqs.map((r) => ({ ref: r.ref, title: r.title, criteria: parse<string[]>(r.criteria, []) }))));
+    if (next !== doc) writeFileSync(file, next);
   }
 
   /** A doc's head_sha is the commit where its file last changed; that is the SHA an approval names. */
@@ -249,7 +263,18 @@ export class Planning {
     return this.store.all<Question>("SELECT * FROM questions WHERE feature_id=? AND issue_key IS NULL AND status IN ('live','waiting') ORDER BY id", featureId);
   }
 
-  private async afterTurn(f: Feature, stage: FeatureStage) {
+  private async afterTurn(f: Feature, stage: TurnKind) {
+    if (stage === "spec_change") {
+      if (!this.store.requirements(f.id).length) return this.failTurn(f.id, "The project manager ended its spec-change turn without requirements.");
+      this.store.updateDoc(f.id, "spec", { status: "in_review" });
+      return;
+    }
+    if (stage === "change_set") {
+      const prop = this.store.proposal(f.id);
+      if (!prop || prop.kind !== "change") return this.failTurn(f.id, "The project manager ended its change turn without calling propose_tasks.");
+      await this.writeTasksDoc(f, prop.id);
+      return;
+    }
     if (stage === "clarify" || stage === "spec") {
       if (this.openQuestions(f.id).length) {
         this.store.event("awaiting_answers", { actor: "system", project: f.project_id, feature: f.id });
@@ -374,8 +399,13 @@ export class Planning {
   /** propose_requirements: replaces the list; refs unique; EARS lint errors come back to fix. */
   proposeRequirements(agentId: string, reqs: ProposedRequirement[]) {
     const f = this.plannerFeature(agentId);
-    if (!["clarify", "spec"].includes(f.stage)) throw new FoundryError("TOOL_REFUSED", "Requirements change only with the spec (spec changes after the task list arrive with the spec edit cascade)");
+    const kind = this.turns.get(f.id)!.stage;
+    if (!["clarify", "spec"].includes(f.stage) && kind !== "spec_change") throw new FoundryError("TOOL_REFUSED", "Requirements change with the spec: in Clarify or Spec, or in a spec-change turn");
     const errors = lintRequirements(reqs);
+    const approved = this.store.approvedRequirements(f.id).map((r) => ({ ref: r.ref, title: r.title, criteria: parse<string[]>(r.criteria, []) }));
+    errors.push(...renumbered(approved, reqs.map((r) => ({ ref: r.ref, title: r.title, criteria: r.acceptance_criteria }))));
+    const retired = new Set(this.store.requirements(f.id, true).filter((r) => r.retired).map((r) => r.ref));
+    for (const r of reqs) if (retired.has(r.ref)) errors.push(`${r.ref} was removed earlier and is never reused; use a new ref.`);
     if (errors.length) throw new FoundryError("REQUIREMENTS_INVALID", `Not recorded. Fix and resend:\n- ${errors.join("\n- ")}`, { errors });
     this.store.setRequirements(
       f.id,
@@ -389,7 +419,8 @@ export class Planning {
   /** propose_tasks: validates the graph; the list is recorded only when it passes. */
   proposeTasks(agentId: string, tasks: ProposedTask[]) {
     const f = this.plannerFeature(agentId);
-    if (f.stage !== "tasks") throw new FoundryError("TOOL_REFUSED", "Tasks are proposed once the plan is approved");
+    if (this.turns.get(f.id)!.stage === "change_set") return this.proposeChangeSet(f, tasks);
+    if (f.stage !== "tasks") throw new FoundryError("TOOL_REFUSED", "Tasks are proposed once the plan is approved, or in a change turn");
     const reqs = this.store.requirements(f.id).map((r) => r.ref);
     const result = validateTasks(tasks, reqs, this.unfinishedIssues(f));
     const prop = this.store.addProposal(f.id, tasks, result);
@@ -420,6 +451,7 @@ export class Planning {
   }
 
   async approveSpec(featureId: number, sha: string, actor: Actor = "you") {
+    if (this.store.feature(featureId)?.spec_change_open) return this.approveChangedSpec(featureId, sha, actor);
     await this.locks.with(`feature:${featureId}`, async () => {
       const f = this.editable(featureId);
       if (f.stage !== "spec") throw new FoundryError("WRONG_STAGE", `The feature is in ${f.stage}, not Spec`);
@@ -431,6 +463,7 @@ export class Planning {
       this.store.tx(() => {
         this.store.updateDoc(f.id, "spec", { status: "approved", approved_sha: sha });
         this.store.run("UPDATE requirements SET spec_sha=? WHERE feature_id=? AND retired=0", sha, f.id);
+        this.store.approveRequirements(f.id);
         this.store.event("doc_approved", { actor, project: f.project_id, feature: f.id, detail: { doc: "spec", sha } });
         this.store.setStage(f.id, "plan", actor);
       });
@@ -488,6 +521,7 @@ export class Planning {
 
   /** Approve the task list at the proposal and tasks.md SHA you read: one issue per live task. */
   async approveTasks(featureId: number, proposalId: number, sha: string, actor: Actor = "you") {
+    if (this.store.proposal(featureId)?.kind === "change") return this.approveChangeSet(featureId, proposalId, sha, actor);
     const keys = await this.locks.with(`feature:${featureId}`, async () => {
       const f = this.editable(featureId);
       if (f.stage !== "tasks") throw new FoundryError("WRONG_STAGE", `The feature is in ${f.stage}, not Tasks`);
@@ -591,6 +625,234 @@ export class Planning {
     const sha = d.head_sha;
     const text = sha ? await git(f.integration_path!, "show", `${sha}:${featureDir(f.slug)}/${DOC_FILES[kind]}`).catch(() => "") : "";
     return { kind, status: d.status, sha, approved_sha: d.approved_sha, text };
+  }
+
+  // ---------- your edits and spec changes ----------
+  /**
+   * Your edit to the spec or plan, committed in the integration worktree. Before Build it sends the
+   * feature back to that doc's stage; in Build an edit to the spec opens a spec change, which pauses
+   * auto-start until you approve its change set or discard it.
+   */
+  async editDoc(featureId: number, kind: "spec" | "plan", text: string, baseSha: string, actor: Actor = "you") {
+    const r = await this.locks.with(`feature:${featureId}`, async () => {
+      const f = this.editable(featureId);
+      const d = this.store.doc(f.id, kind)!;
+      if (!d.head_sha) throw new FoundryError("NOT_FOUND", `There is no ${kind} to edit yet`);
+      if (d.head_sha !== baseSha) throw new FoundryError("STALE_EDIT", "It changed since you read it", { head_sha: d.head_sha });
+      const building = ["build"].includes(f.stage);
+      if (["verify", "ship", "done"].includes(f.stage)) throw new FoundryError("NOT_SUPPORTED_YET", "Editing a feature in Verify, Ship or Done arrives with Verify and Ship.");
+      if (kind === "spec" && f.stage === "clarify") throw new FoundryError("WRONG_STAGE", "The spec is still being written");
+      if (kind === "plan" && !["plan", "tasks"].includes(f.stage)) throw new FoundryError(building ? "NOT_SUPPORTED_YET" : "WRONG_STAGE", building ? "Plan edits during Build arrive later; edit the spec instead." : "There is no plan to edit yet");
+      const rel = `${featureDir(f.slug)}/${DOC_FILES[kind]}`;
+      const file = join(f.integration_path!, rel);
+      const before = existsSync(file) ? readFileSync(file, "utf8") : "";
+      if (before === text) return { changed: false } as const;
+      writeFileSync(file, text);
+      if (kind === "spec") this.syncRequirements(f);
+      const commit = await this.commitAsYou(f.integration_path!, rel, `${f.slug}: ${kind} edited by the developer`);
+      this.store.updateFeature(f.id, { head_sha: commit });
+      const wasApproved = d.status === "approved";
+      this.store.tx(() => {
+        this.store.updateDoc(f.id, kind, { head_sha: commit, status: "in_review" });
+        this.store.event("doc_edited", { actor, project: f.project_id, feature: f.id, detail: { doc: kind, sha: commit } });
+        const later: DocKind[] = kind === "spec" ? ["plan", "tasks"] : ["tasks"];
+        if (wasApproved || d.status === "in_review")
+          for (const k of later) if (["approved", "in_review"].includes(this.store.doc(f.id, k)!.status)) this.store.updateDoc(f.id, k, { status: "stale" });
+        if (!building) {
+          this.store.run("UPDATE task_proposals SET status='superseded' WHERE feature_id=? AND status='proposed'", f.id);
+          if (kind === "spec" && f.stage !== "spec") this.store.setStage(f.id, "spec", actor);
+          if (kind === "plan" && f.stage === "tasks") this.store.setStage(f.id, "plan", actor);
+        } else if (!this.store.openSpecChange(f.id)) {
+          this.store.run("INSERT INTO spec_changes(feature_id,base_spec_sha,diff) VALUES(?,?,?)", f.id, d.approved_sha, JSON.stringify({ base: this.approvedList(f.id) }));
+          this.store.updateFeature(f.id, { spec_change_open: 1 });
+          this.store.event("spec_change_opened", { actor, project: f.project_id, feature: f.id, detail: { base: d.approved_sha } });
+        }
+      });
+      return { changed: true, sha: commit, building } as const;
+    });
+    if (r.changed && kind === "spec") {
+      const msg = `The developer edited ${featureDir(this.store.feature(featureId)!.slug)}/spec.md. Re-read it and call propose_requirements with the requirements as they now stand. Keep the ref of every requirement you don't change and never reuse a removed ref. Change nothing else, then end your turn.`;
+      await this.runTurn(featureId, r.building ? "spec_change" : "spec", msg).catch((e) => this.failTurn(featureId, String(e)));
+    }
+    return r;
+  }
+
+  private approvedList(featureId: number) {
+    return this.store.approvedRequirements(featureId).map((r) => ({ ref: r.ref, title: r.title, criteria: parse<string[]>(r.criteria, []) }));
+  }
+
+  private async commitAsYou(path: string, rel: string, message: string): Promise<string> {
+    await git(path, "add", "-A", "--", rel);
+    // Your own git identity; Foundry's fallback only if the repo has none.
+    const r = await sh("git", ["commit", "-q", "-m", message], { cwd: path });
+    if (r.code !== 0) await git(path, "-c", "user.name=Developer", "-c", "user.email=developer@localhost", "commit", "-q", "-m", message);
+    return head(path);
+  }
+
+  /** Approving a changed spec: Foundry diffs its requirements against the last approved ones and asks the PM for one change set. */
+  private async approveChangedSpec(featureId: number, sha: string, actor: Actor) {
+    const diff = await this.locks.with(`feature:${featureId}`, async () => {
+      const f = this.editable(featureId);
+      const change = this.store.openSpecChange(f.id)!;
+      this.assertDoc(f, "spec", sha);
+      const live = this.store.requirements(f.id).map((r) => ({ ref: r.ref, title: r.title, criteria: parse<string[]>(r.criteria, []) }));
+      const errors = lintRequirements(live.map((r) => ({ ref: r.ref, title: r.title, acceptance_criteria: r.criteria })));
+      if (errors.length) throw new FoundryError("REQUIREMENTS_INVALID", errors.join("\n"), { errors });
+      const base = parse<{ base?: typeof live }>(change.diff, {}).base ?? this.approvedList(f.id);
+      const moved = renumbered(base, live);
+      if (moved.length) throw new FoundryError("REQUIREMENTS_RENUMBERED", `Refs were renumbered: ${moved.join("; ")}`, { refs: moved });
+      const diff = diffRequirements(base, live);
+      this.store.tx(() => {
+        this.store.updateDoc(f.id, "spec", { status: "approved", approved_sha: sha });
+        // "Plan unchanged": the current plan is re-approved at its SHA.
+        const plan = this.store.doc(f.id, "plan")!;
+        this.store.updateDoc(f.id, "plan", { status: "approved", approved_sha: plan.head_sha });
+        this.store.run("UPDATE requirements SET spec_sha=? WHERE feature_id=? AND retired=0", sha, f.id);
+        this.store.approveRequirements(f.id);
+        this.store.run("UPDATE spec_changes SET diff=? WHERE id=?", JSON.stringify({ base, ...diff }), change.id);
+        this.store.event("doc_approved", { actor, project: f.project_id, feature: f.id, detail: { doc: "spec", sha, change: change.id, diff } });
+      });
+      return diff;
+    });
+    const f = this.store.feature(featureId)!;
+    const tasks = this.store
+      .issues({ featureId })
+      .map((i) => `- ${i.key} [${i.status}] ${i.title} (covers ${parse<string[]>(i.requirement_refs, []).join(", ") || "nothing"})`);
+    const msg = [
+      "The developer approved a changed spec. Requirement diff against the last approved spec:",
+      `- unchanged: ${diff.unchanged.join(", ") || "none"}`,
+      `- changed: ${diff.changed.join(", ") || "none"}`,
+      `- added: ${diff.added.join(", ") || "none"}`,
+      `- removed: ${diff.removed.join(", ") || "none"}`,
+      "",
+      "Every task of the feature:",
+      ...tasks,
+      "",
+      "Call propose_tasks once with one change set. List every task above that isn't Cancelled with its issue key and a tag:",
+      "keep (covers only unchanged requirements, or is Done); update (not started and covers a changed requirement: give the new description, requirement_refs and checks); flag (running or in review and covers a changed or removed requirement); cancel (not started and covers only removed requirements).",
+      "Then add new tasks (ref, tag new) for added requirements, a followup task (depends on the Done task) for each Done task covering a changed requirement, and optionally a removal task for Done work on a removed requirement.",
+      "Every current requirement must be covered. Do not write tasks.md. End your turn.",
+    ].join("\n");
+    await this.runTurn(featureId, "change_set", msg).catch((e) => this.failTurn(featureId, String(e)));
+    return this.store.feature(f.id)!;
+  }
+
+  private proposeChangeSet(f: Feature, tasks: ProposedTask[]) {
+    const change = this.store.openSpecChange(f.id);
+    if (!change) throw new FoundryError("TOOL_REFUSED", "There is no open spec change");
+    const diff = parse<RequirementDiff>(change.diff, { unchanged: [], changed: [], added: [], removed: [] });
+    const existing = this.store.issues({ featureId: f.id }).map((i) => ({ key: i.key, status: i.status, requirement_refs: parse<string[]>(i.requirement_refs, []), touches: parse<string[]>(i.touches, []) }));
+    const others = this.unfinishedIssues(f).filter((o) => !existing.some((e) => e.key === o.key));
+    const result = validateChangeSet(tasks, diff, existing, others);
+    const prop = this.store.addProposal(f.id, tasks, result, "change");
+    this.store.event("change_set_proposed", { actor: "pm", project: f.project_id, feature: f.id, detail: { proposal: prop.id, entries: tasks.length } });
+    return { recorded: true, proposal: prop.id, waves: result.waves, warnings: result.warnings };
+  }
+
+  /** Apply a change set in one step, all or nothing; auto-start resumes. */
+  private async approveChangeSet(featureId: number, proposalId: number, sha: string, actor: Actor) {
+    const out = await this.locks.with(`feature:${featureId}`, async () => {
+      const f = this.editable(featureId);
+      const change = this.store.openSpecChange(f.id);
+      const prop = this.store.proposal(f.id);
+      if (!change || !prop || prop.kind !== "change" || prop.id !== proposalId) throw new FoundryError("PROPOSAL_CHANGED", "The change set changed: review the current one", { current: prop?.id ?? null });
+      this.assertDoc(f, "tasks", sha);
+      const diff = parse<RequirementDiff & { base?: { ref: string; title: string; criteria: string[] }[] }>(change.diff, { unchanged: [], changed: [], added: [], removed: [] });
+      const entries = parse<ProposedTask[]>(prop.tasks, []);
+      const existing = this.store.issues({ featureId: f.id }).map((i) => ({ key: i.key, status: i.status, requirement_refs: parse<string[]>(i.requirement_refs, []), touches: parse<string[]>(i.touches, []) }));
+      const g = validateChangeSet(entries, diff, existing, this.unfinishedIssues(f).filter((o) => !existing.some((e) => e.key === o.key)));
+      return this.store.tx(() => {
+        const keyOf = new Map<string, string>();
+        const applied: Record<string, string> = {};
+        for (const e of entries.filter((x) => x.issue)) {
+          const key = e.issue!;
+          applied[key] = e.tag!;
+          if (e.tag === "update")
+            this.store.updateIssue(key, { title: e.title || this.store.issue(key)!.title, description: e.description ?? "", acceptance: e.exit_criteria ?? "", checks: JSON.stringify(e.checks ?? {}), requirement_refs: JSON.stringify(e.requirement_refs ?? []), touches: JSON.stringify(e.touches ?? []) }, actor);
+          else if (e.tag === "flag") this.store.updateIssue(key, { flag: "SPEC_CHANGED" }, actor);
+          else if (e.tag === "cancel") this.store.setIssueStatus(key, "Cancelled", actor, null, { why: "spec change", change: change.id });
+        }
+        const fresh = entries.filter((x) => !x.issue);
+        const byRef = new Map(fresh.map((t) => [t.ref, t]));
+        for (const wave of g.waves)
+          for (const ref of wave) {
+            const t = byRef.get(ref)!;
+            const deps = t.depends_on ?? [];
+            const depKeys = deps.map((d) => keyOf.get(d.ref) ?? d.ref);
+            const waiting = depKeys.some((k) => this.store.issue(k)?.status !== "Done");
+            const i = this.store.createIssue({
+              projectId: f.project_id,
+              featureId: f.id,
+              origin: "feature",
+              title: t.title,
+              description: t.description ?? "",
+              acceptance: t.exit_criteria ?? "",
+              status: waiting ? "Backlog" : "Ready",
+              priority: g.priority[ref],
+              size: t.size ?? null,
+              loop: t.loop ?? null,
+              checks: t.checks ?? {},
+              touches: t.touches ?? [],
+              requirementRefs: t.requirement_refs ?? [],
+              profile: t.profile ?? null,
+              actor,
+            });
+            deps.forEach((d, n) => this.store.addDep(i.key, depKeys[n]!, d.reason ?? ""));
+            keyOf.set(ref, i.key);
+            applied[i.key] = t.tag ?? "new";
+          }
+        for (const ref of diff.removed) {
+          const old = diff.base?.find((r) => r.ref === ref);
+          this.store.run("INSERT OR REPLACE INTO requirements(feature_id,ref,title,criteria,spec_sha,retired) VALUES(?,?,?,?,?,1)", f.id, ref, old?.title ?? ref, JSON.stringify(old?.criteria ?? []), sha);
+        }
+        this.store.run("UPDATE task_proposals SET status='approved' WHERE id=?", prop.id);
+        // Done before the change: such tasks never count toward a changed or added requirement's coverage.
+        const doneBefore = existing.filter((i) => i.status === "Done").map((i) => i.key);
+        this.store.run("UPDATE spec_changes SET status='approved', decided_at=datetime('now'), diff=? WHERE id=?", JSON.stringify({ ...diff, done_before: doneBefore }), change.id);
+        this.store.updateDoc(f.id, "tasks", { status: "approved", approved_sha: sha });
+        this.store.updateFeature(f.id, { spec_change_open: 0 });
+        this.store.event("change_set_approved", { actor, project: f.project_id, feature: f.id, detail: { change: change.id, proposal: prop.id, applied } });
+        return applied;
+      });
+    });
+    await this.onBuild();
+    return { applied: out };
+  }
+
+  /** Discard an open spec change: the approved spec comes back as a new commit and everything resumes. */
+  async discardChange(featureId: number, actor: Actor = "you") {
+    await this.locks.with(`feature:${featureId}`, async () => {
+      const f = this.editable(featureId);
+      const change = this.store.openSpecChange(f.id);
+      if (!change) throw new FoundryError("NO_SPEC_CHANGE", "There is no open spec change");
+      const rel = `${featureDir(f.slug)}/${DOC_FILES.spec}`;
+      const text = await git(f.integration_path!, "show", `${change.base_spec_sha}:${rel}`);
+      writeFileSync(join(f.integration_path!, rel), text + "\n");
+      const base = parse<{ base?: { ref: string; title: string; criteria: string[] }[] }>(change.diff, {}).base ?? [];
+      this.store.setRequirements(f.id, base, change.base_spec_sha);
+      this.syncRequirements(f);
+      const tasksDoc = this.store.doc(f.id, "tasks")!;
+      if (tasksDoc.approved_sha) {
+        const tRel = `${featureDir(f.slug)}/${DOC_FILES.tasks}`;
+        const t = await git(f.integration_path!, "show", `${tasksDoc.approved_sha}:${tRel}`).catch(() => null);
+        if (t !== null) writeFileSync(join(f.integration_path!, tRel), t + "\n");
+      }
+      const commit = (await commitAll(f.integration_path!, `${f.slug}: discard spec change`, FOUNDRY_IDENT)) ?? (await head(f.integration_path!));
+      this.store.tx(() => {
+        this.store.updateFeature(f.id, { head_sha: commit, spec_change_open: 0 });
+        this.store.approveRequirements(f.id);
+        this.store.updateDoc(f.id, "spec", { status: "approved", head_sha: commit, approved_sha: commit });
+        for (const k of ["plan", "tasks"] as DocKind[]) {
+          const d = this.store.doc(f.id, k)!;
+          if (d.approved_sha) this.store.updateDoc(f.id, k, { status: "approved", head_sha: commit, approved_sha: commit });
+        }
+        this.store.run("UPDATE task_proposals SET status='superseded' WHERE feature_id=? AND status='proposed' AND kind='change'", f.id);
+        this.store.run("UPDATE spec_changes SET status='discarded', decided_at=datetime('now') WHERE id=?", change.id);
+        this.store.event("spec_change_discarded", { actor, project: f.project_id, feature: f.id, detail: { change: change.id, commit } });
+      });
+    });
+    await this.onBuild();
+    return this.store.feature(featureId)!;
   }
 
   async recover() {
