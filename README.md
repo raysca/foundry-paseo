@@ -44,6 +44,7 @@ End to end, against a real Paseo 0.18 daemon on its own home and port (needs zsh
 bash e2e/smoke.sh                 # scripted harness, as CI runs it
 HARNESS=claude bash e2e/smoke.sh  # real Claude Code, on a Mac
 bash e2e/loop2.sh                 # loop 2: two tasks through checks, review, a question and accept
+bash e2e/loop1.sh                 # loop 1: a feature from idea to approved task list, then its tasks
 ```
 
 ## Install on your own Paseo

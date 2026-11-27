@@ -85,6 +85,9 @@ export default function contribute(server: PluginServerContext) {
       issues: store.issues(),
       attempts: store.all("SELECT * FROM attempts ORDER BY id DESC LIMIT 200"),
       runs: store.all("SELECT * FROM runs ORDER BY id DESC LIMIT 200"),
+      docs: store.all("SELECT * FROM feature_docs ORDER BY feature_id, kind"),
+      requirements: store.all("SELECT * FROM requirements WHERE retired=0 ORDER BY feature_id, ref"),
+      proposals: store.all("SELECT * FROM task_proposals WHERE status IN ('proposed','approved') ORDER BY id DESC LIMIT 50"),
       questions: store.all("SELECT * FROM questions WHERE status IN ('live','waiting') ORDER BY id"),
       events: store.events({ limit: 200 }),
     })),
@@ -105,6 +108,36 @@ export default function contribute(server: PluginServerContext) {
           return foundry.tasks.rework(String(args.key), String(args.head_sha), String(args.tree_sha), String(args.feedback ?? ""));
         case "issue.followup":
           return foundry.tasks.followUp(String(args.key), String(args.text ?? ""));
+        case "feature.create":
+          return foundry.planning.createFeature({
+            projectId: Number(args.project_id ?? store.projectByKey(String(args.project))?.id),
+            idea: String(args.idea ?? ""),
+            title: args.title ? String(args.title) : undefined,
+            flow: args.flow,
+            grill: args.grill ?? null,
+          });
+        case "feature.doc":
+          return foundry.planning.readDoc(Number(args.id), args.kind);
+        case "feature.answer":
+          return foundry.planning.answer(Number(args.id), args.answers ?? {});
+        case "feature.approve_spec":
+          return foundry.planning.approveSpec(Number(args.id), String(args.sha));
+        case "feature.approve_plan":
+          return foundry.planning.approvePlan(Number(args.id), String(args.sha));
+        case "feature.approve_tasks":
+          return foundry.planning.approveTasks(Number(args.id), Number(args.proposal), String(args.sha));
+        case "feature.cut_task":
+          return foundry.planning.cutTask(Number(args.id), String(args.ref), args.cut !== false);
+        case "feature.revise":
+          return foundry.planning.revise(Number(args.id), args.kind, String(args.note ?? ""));
+        case "feature.retry":
+          return foundry.planning.retry(Number(args.id));
+        case "feature.pause":
+          return foundry.planning.setStatus(Number(args.id), "paused");
+        case "feature.resume":
+          return foundry.planning.setStatus(Number(args.id), "active");
+        case "feature.cancel":
+          return foundry.planning.setStatus(Number(args.id), "cancelled");
         case "question.answer":
           return foundry.tasks.answer(Number(args.id), String(args.text ?? ""));
         case "dev.seed_feature":

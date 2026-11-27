@@ -24,6 +24,8 @@ interface Session {
   turn: number;
   mcp: Client[] | null;
   tools: Map<string, Client>;
+  /** The feature folder a planning session may write in, from its first prompt. */
+  featureDir?: string;
 }
 
 export default function contribute(server: PluginServerContext) {
@@ -160,6 +162,11 @@ async function script(s: Session, text: string): Promise<string> {
   }
   if (probe === "verdict_for_other") return call(s, "report_verdict", { decision: "fail", reason: "cross-task", issue_key: /ISSUE:(\S+)/.exec(text)?.[1] });
 
+  // Loop 1 planner (the PM in a feature's integration worktree).
+  const dir = /Write only under (\S+)\//.exec(text)?.[1];
+  if (dir) s.featureDir = dir;
+  if (s.featureDir) return plan(s, s.featureDir, text);
+
   // Loop 2 builder. Task titles decide what the scripted builder does.
   const task = /Foundry builder working on (\S+): (.*)/.exec(text);
   if (task && /shout\(\)/.test(task[2]!)) {
@@ -180,6 +187,49 @@ async function script(s: Session, text: string): Promise<string> {
     return call(s, "report_verdict", { decision: "pass", reason: `Looks right for ${key}.` });
   }
   return `echo: ${text.slice(0, 80)}`;
+}
+
+async function plan(s: Session, dir: string, text: string): Promise<string> {
+  const cwd = s.config.cwd;
+  if (text.includes("call propose_tasks")) {
+    const r = await call(s, "propose_tasks", {
+      tasks: [
+        { ref: "T1", title: "Add shout() to shout/core.py with tests", requirement_refs: ["R1"], touches: ["shout/core.py"], size: "S", checks: { scripts: ["unittest"] } },
+        {
+          ref: "T2",
+          title: "Add --shout flag to the CLI with a test",
+          requirement_refs: ["R2"],
+          depends_on: [{ ref: "T1", reason: "the flag calls shout()" }],
+          touches: ["shout/cli.py"],
+          size: "S",
+        },
+      ],
+    });
+    return `Proposed the task graph. ${r}`;
+  }
+  if (text.includes("plan.md with")) {
+    write(cwd, `${dir}/plan.md`, "# Plan\n\n## Approach\nshout() in core, a flag in the CLI.\n\n## Files and components\n- shout/core.py\n- shout/cli.py\n\n## Data and API changes\nNone.\n\n## Risks\nNone.\n\n## Test strategy\nunittest.\n");
+    return "Wrote plan.md.";
+  }
+  if (text.includes("Step 1, Clarify")) {
+    const ans = await call(s, "ask_questions", { questions: [{ id: "short_flag", text: "Should --shout also accept -s?", recommended: "yes" }] });
+    if (ans.startsWith("The developer hasn't answered")) return "Waiting for the developer's answers.";
+  }
+  if (text.includes("Step 2")) {
+    write(
+      cwd,
+      `${dir}/spec.md`,
+      "# Shout mode\n\n## Goal\nLet the CLI shout.\n\n## User stories\nAs a user I can shout.\n\n## Requirements\n\nR1 Shout\n- WHEN shout(text) is called THE library SHALL return text upper-cased with ! appended\n\nR2 CLI flag\n- WHERE --shout is given THE CLI SHALL print the shouted text\n\n## Out of scope\nWhispering.\n\n## Decisions\n- See the answers.\n",
+    );
+    const r = await call(s, "propose_requirements", {
+      requirements: [
+        { ref: "R1", title: "Shout", acceptance_criteria: ["WHEN shout(text) is called THE library SHALL return text upper-cased with ! appended"] },
+        { ref: "R2", title: "CLI flag", acceptance_criteria: ["WHERE --shout is given THE CLI SHALL print the shouted text"] },
+      ],
+    });
+    return `Wrote spec.md. ${r}`;
+  }
+  return `planner echo: ${text.slice(0, 80)}`;
 }
 
 function implementB(cwd: string, answer: string) {
