@@ -41,7 +41,15 @@ const log = (...a) => console.log(`[${new Date().toISOString().slice(11, 19)}]`,
     await skip.waitFor({ timeout: 8000 }).then(() => skip.click(), () => {});
     await p.waitForTimeout(500);
     await p.getByText("Foundry", { exact: true }).first().click();
+    await see("Your Paseo projects");
+    await see("Not used with Foundry yet");
+    await shot("projects");
+  });
+
+  await step("start using the Paseo project with Foundry from its card", async () => {
+    await p.getByText("Not used with Foundry yet", { exact: false }).locator("visible=true").first().click();
     await see("New feature");
+    await see("base main");
     await shot("home");
   });
 
@@ -75,11 +83,11 @@ const log = (...a) => console.log(`[${new Date().toISOString().slice(11, 19)}]`,
     await see("Build", 30000);
   });
 
-  for (const key of ["SHT-1", "SHT-2"]) {
+  for (const key of ["REP-1", "REP-2"]) {
     await step(`review and accept ${key}`, async () => {
       // Back to the feature, then into the task once it waits on review.
       await p.getByText(key, { exact: true }).locator("visible=true").first().click();
-      if (key === "SHT-2") {
+      if (key === "REP-2") {
         // The scripted builder asks whether -s works too; the answer resumes its session.
         await see("Waiting on your answer", 240000);
         await shot("question");

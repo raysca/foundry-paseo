@@ -12,7 +12,8 @@ start_daemon
 install_plugins
 wait_for "any(e['kind']=='sdk_attached' for e in d['events'])" 60 "Foundry attached"
 fresh_repo
-fact project.create "{\"key\":\"SHT\",\"name\":\"Shout\",\"repo\":\"$WORK/repo\"}" >/dev/null
+# Register the repo as a Paseo project the way any agent run does; Foundry's first screen lists it as a card.
+P run --provider scripted --cwd "$WORK/repo" "hello" >/dev/null
 
 node "$E2E/ui/flow.cjs" "http://127.0.0.1:${PORT}/" "$WORK/ui"
 q "f=d['features'][0]; assert f['stage']=='done', f['stage']; print('feature Done')"

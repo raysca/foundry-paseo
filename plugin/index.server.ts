@@ -7,6 +7,7 @@ import type { PluginServerContext, PluginHandlerContext } from "@getpaseo/plugin
 import { Store } from "./server/core/store";
 import { Foundry } from "./server/core/foundry";
 import { featuresOverview } from "./server/core/overview";
+import { adoptRepo } from "./server/core/projects";
 import { FoundryError } from "./server/core/model";
 import { PaseoAdapter, type AdapterConfig } from "./server/adapter/paseo";
 import { buildTools } from "./server/adapter/tools";
@@ -106,6 +107,8 @@ export default function contribute(server: PluginServerContext) {
       switch (action) {
         case "project.create":
           return store.createProject({ key: String(args.key), name: String(args.name ?? args.key), repo: String(args.repo), baseRef: String(args.baseRef ?? "main") });
+        case "project.adopt":
+          return adoptRepo(store, { repo: String(args.repo ?? ""), name: args.name ? String(args.name) : undefined });
         case "setup.check":
           return foundry.runSetupCheck();
         case "issue.start":
