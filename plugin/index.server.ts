@@ -84,6 +84,7 @@ export default function contribute(server: PluginServerContext) {
       features: store.features(),
       issues: store.issues(),
       attempts: store.all("SELECT * FROM attempts ORDER BY id DESC LIMIT 200"),
+      runs: store.all("SELECT * FROM runs ORDER BY id DESC LIMIT 200"),
       questions: store.all("SELECT * FROM questions WHERE status IN ('live','waiting') ORDER BY id"),
       events: store.events({ limit: 200 }),
     })),
