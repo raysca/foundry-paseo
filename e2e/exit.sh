@@ -80,12 +80,15 @@ text=d['text'].replace('## Out of scope', 'Also: --loud is an alias of --shout.\
 print(json.dumps({'id':$FID,'kind':'spec','text':text,'base_sha':d['sha']}))")
 fact feature.edit_doc "$EDIT" | ok "spec edited"
 q "f=$(feat); assert f['spec_change_open']==1, f; print('spec change open')"
+# The PM's turn ends with Foundry committing the spec it regenerates; wait for that commit, not just the rows.
+EDITED=$(q "import json; print(json.loads([e for e in d['events'] if e['kind']=='doc_edited' and e['feature_id']==$FID][-1]['detail'])['sha'])")
+pmdone="any(x['feature_id']==$FID and x['kind']=='spec' and x['status']=='in_review' and x['head_sha']!='$EDITED' for x in d['docs'])"
 if [ $REAL = 1 ]; then
   # A real PM may add a requirement or fold --loud into existing ones; both are fair readings of the edit.
-  wait_for "(len($(newref))>=1 or any(r['feature_id']==$FID and '--loud' in r['criteria'] for r in d['requirements'])) and any(x['feature_id']==$FID and x['kind']=='spec' and x['status']=='in_review' for x in d['docs'])" 600 "PM restated the requirements (--loud added or folded in)"
+  wait_for "(len($(newref))>=1 or any(r['feature_id']==$FID and '--loud' in r['criteria'] for r in d['requirements'])) and $pmdone" 600 "PM restated the requirements (--loud added or folded in)"
   NEW=$(q "print(($(newref) or [''])[0])")
 else
-  wait_for "len($(newref))==1 and any(x['feature_id']==$FID and x['kind']=='spec' and x['status']=='in_review' for x in d['docs'])" 120 "PM restated the requirements (one added)"
+  wait_for "len($(newref))==1 and $pmdone" 120 "PM restated the requirements (one added)"
   NEW=$(q "print($(newref)[0])")
   [ "$NEW" = "R3" ]
 fi
