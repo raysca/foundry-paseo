@@ -6,6 +6,7 @@ import { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import type { PluginServerContext, PluginHandlerContext } from "@getpaseo/plugin/server";
 import { Store } from "./server/core/store";
 import { Foundry } from "./server/core/foundry";
+import { featuresOverview } from "./server/core/overview";
 import { FoundryError } from "./server/core/model";
 import { PaseoAdapter, type AdapterConfig } from "./server/adapter/paseo";
 import { buildTools } from "./server/adapter/tools";
@@ -81,6 +82,7 @@ export default function contribute(server: PluginServerContext) {
     withSdk(() => ({
       setup: foundry.setupStatus(),
       projects: store.projects(),
+      overview: featuresOverview(store),
       features: store.features(),
       issues: store.issues(),
       attempts: store.all("SELECT * FROM attempts ORDER BY id DESC LIMIT 200"),
@@ -130,6 +132,10 @@ export default function contribute(server: PluginServerContext) {
           return foundry.planning.cutTask(Number(args.id), String(args.ref), args.cut !== false);
         case "feature.revise":
           return foundry.planning.revise(Number(args.id), args.kind, String(args.note ?? ""));
+        case "feature.edit_doc":
+          return foundry.planning.editDoc(Number(args.id), args.kind, String(args.text ?? ""), String(args.base_sha ?? ""));
+        case "feature.discard_change":
+          return foundry.planning.discardChange(Number(args.id));
         case "feature.retry":
           return foundry.planning.retry(Number(args.id));
         case "feature.pause":

@@ -118,7 +118,7 @@ test("standard flow: clarify to spec, approve spec, plan, tasks, then issues tha
 
   await assert.rejects(planning.approveTasks(f.id, prop.id + 1, tasksDoc.sha!), code("PROPOSAL_CHANGED"));
   const r = await planning.approveTasks(f.id, prop.id, tasksDoc.sha!);
-  assert.deepEqual(r.issues, { T1: "SHT-1", T2: "SHT-2" });
+  assert.deepEqual((r as { issues: Record<string, string> }).issues, { T1: "SHT-1", T2: "SHT-2" });
   assert.equal(store.feature(f.id)!.stage, "build");
   assert.equal(store.issue("SHT-2")!.status, "Backlog");
   assert.deepEqual(store.deps("SHT-2").map((d) => [d.depends_on, d.reason]), [["SHT-1", "uses shout()"]]);

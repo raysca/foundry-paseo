@@ -174,6 +174,16 @@ export interface Question {
   round: number | null;
 }
 
+export interface SpecChange {
+  id: number;
+  feature_id: number;
+  status: "open" | "approved" | "discarded";
+  base_spec_sha: string | null;
+  diff: string; // JSON RequirementDiff, set when the changed spec is approved
+  created_at: string;
+  decided_at: string | null;
+}
+
 export interface TaskProposal {
   id: number;
   feature_id: number;
@@ -308,6 +318,16 @@ const MIGRATIONS: string[] = [
    ALTER TABLE questions ADD COLUMN round INTEGER;
    ALTER TABLE task_proposals ADD COLUMN result TEXT NOT NULL DEFAULT '{}';
    ALTER TABLE task_proposals ADD COLUMN cut TEXT NOT NULL DEFAULT '[]';`,
+  // 4: spec changes after the task list exists, and the requirements as last approved
+  `CREATE TABLE spec_changes (
+     id INTEGER PRIMARY KEY, feature_id INTEGER NOT NULL REFERENCES features(id), status TEXT NOT NULL DEFAULT 'open',
+     base_spec_sha TEXT, diff TEXT NOT NULL DEFAULT '{}',
+     created_at TEXT NOT NULL DEFAULT (datetime('now')), decided_at TEXT);
+   CREATE TABLE approved_requirements (
+     feature_id INTEGER NOT NULL REFERENCES features(id), ref TEXT NOT NULL, title TEXT NOT NULL,
+     criteria TEXT NOT NULL DEFAULT '[]', PRIMARY KEY(feature_id, ref));
+   INSERT INTO approved_requirements(feature_id,ref,title,criteria)
+     SELECT feature_id,ref,title,criteria FROM requirements WHERE retired=0 AND spec_sha IS NOT NULL;`,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
@@ -491,13 +511,24 @@ export class Store {
         this.run("INSERT OR REPLACE INTO requirements(feature_id,ref,title,criteria,spec_sha,retired) VALUES(?,?,?,?,?,0)", featureId, r.ref, r.title, json(r.criteria), specSha);
     });
   }
+  approvedRequirements(featureId: number) {
+    return this.all<{ ref: string; title: string; criteria: string }>("SELECT ref,title,criteria FROM approved_requirements WHERE feature_id=? ORDER BY ref", featureId);
+  }
+  /** Snapshot the live requirements as approved. */
+  approveRequirements(featureId: number) {
+    this.run("DELETE FROM approved_requirements WHERE feature_id=?", featureId);
+    this.run("INSERT INTO approved_requirements(feature_id,ref,title,criteria) SELECT feature_id,ref,title,criteria FROM requirements WHERE feature_id=? AND retired=0", featureId);
+  }
+  openSpecChange(featureId: number) {
+    return this.get<SpecChange>("SELECT * FROM spec_changes WHERE feature_id=? AND status='open' ORDER BY id DESC LIMIT 1", featureId);
+  }
   proposal(featureId: number) {
     return this.get<TaskProposal>("SELECT * FROM task_proposals WHERE feature_id=? AND status='proposed' ORDER BY id DESC LIMIT 1", featureId);
   }
   proposals(featureId: number) {
     return this.all<TaskProposal>("SELECT * FROM task_proposals WHERE feature_id=? ORDER BY id", featureId);
   }
-  addProposal(featureId: number, tasks: unknown, result: unknown, kind = "initial"): TaskProposal {
+  addProposal(featureId: number, tasks: unknown, result: unknown, kind: "initial" | "change" = "initial"): TaskProposal {
     return this.tx(() => {
       this.run("UPDATE task_proposals SET status='superseded' WHERE feature_id=? AND status='proposed'", featureId);
       const r = this.run("INSERT INTO task_proposals(feature_id,kind,tasks,result) VALUES(?,?,?,?)", featureId, kind, json(tasks), json(result));

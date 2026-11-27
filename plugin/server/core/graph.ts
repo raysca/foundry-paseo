@@ -57,6 +57,113 @@ export interface ProposedTask {
   loop?: string | null;
   checks?: TaskChecksInput;
   profile?: string | null;
+  /** Change sets only: the existing issue this entry is about, and what happens to it. */
+  issue?: string;
+  tag?: ChangeTag;
+}
+
+export type ChangeTag = "keep" | "update" | "flag" | "cancel" | "new" | "followup" | "removal";
+
+export interface RequirementDiff {
+  unchanged: string[];
+  changed: string[];
+  added: string[];
+  removed: string[];
+}
+
+type Req = { ref: string; title: string; criteria: string[] };
+
+/** Compare the current requirements with the last approved ones, by ref. */
+export function diffRequirements(before: Req[], after: Req[]): RequirementDiff {
+  const b = new Map(before.map((r) => [r.ref, r]));
+  const a = new Map(after.map((r) => [r.ref, r]));
+  const same = (x: Req, y: Req) => x.title === y.title && JSON.stringify(x.criteria) === JSON.stringify(y.criteria);
+  const d: RequirementDiff = { unchanged: [], changed: [], added: [], removed: [] };
+  for (const r of after) {
+    const old = b.get(r.ref);
+    if (!old) d.added.push(r.ref);
+    else (same(old, r) ? d.unchanged : d.changed).push(r.ref);
+  }
+  for (const r of before) if (!a.has(r.ref)) d.removed.push(r.ref);
+  return d;
+}
+
+/** Refs a revision renumbered: an approved requirement that reappears unchanged under another ref. */
+export function renumbered(before: Req[], after: Req[]): string[] {
+  const out: string[] = [];
+  const afterRefs = new Set(after.map((r) => r.ref));
+  for (const old of before) {
+    if (afterRefs.has(old.ref)) continue;
+    const moved = after.find((r) => r.ref !== old.ref && r.title === old.title && JSON.stringify(r.criteria) === JSON.stringify(old.criteria));
+    if (moved) out.push(`${old.ref} reappears unchanged as ${moved.ref}; keep ${old.ref}`);
+  }
+  return out;
+}
+
+export interface ExistingIssue {
+  key: string;
+  status: string;
+  requirement_refs: string[];
+  touches: string[];
+}
+
+const NOT_STARTED = ["Backlog", "Ready", "Failed", "Blocked"];
+const RUNNING = ["In_Progress", "Awaiting_Human", "In_Review"];
+
+/** The tags a change set may give an existing task (spec: Cascade on tasks). */
+export function allowedTags(i: ExistingIssue, d: RequirementDiff): ChangeTag[] {
+  const covers = i.requirement_refs;
+  const kind = covers.some((r) => d.changed.includes(r)) ? "changed" : covers.length && covers.every((r) => d.removed.includes(r)) ? "removed" : "unchanged";
+  if (kind === "unchanged") return ["keep"];
+  if (NOT_STARTED.includes(i.status)) return kind === "changed" ? ["update"] : ["cancel"];
+  if (RUNNING.includes(i.status)) return ["flag"];
+  return ["keep"]; // Done stays Done; a follow-up or removal task brings the code in line
+}
+
+/**
+ * Validate a change set: every existing task of the feature tagged by the cascade rules, new tasks
+ * tagged new, followup or removal, every current requirement covered, and the usual graph rules.
+ */
+export function validateChangeSet(entries: ProposedTask[], d: RequirementDiff, existing: ExistingIssue[], others: { key: string; touches: string[] }[] = []): GraphResult {
+  const errors: string[] = [];
+  const live = existing.filter((i) => i.status !== "Cancelled");
+  const byKey = new Map(live.map((i) => [i.key, i]));
+  const seen = new Set<string>();
+  const fresh: ProposedTask[] = [];
+  for (const e of entries) {
+    if (e.issue) {
+      const i = byKey.get(e.issue);
+      if (!i) {
+        errors.push(`${e.issue} is not a live task of this feature.`);
+        continue;
+      }
+      if (seen.has(e.issue)) errors.push(`${e.issue} appears twice.`);
+      seen.add(e.issue);
+      const ok = allowedTags(i, d);
+      if (!e.tag || !ok.includes(e.tag)) errors.push(`${e.issue} (${i.status}) must be tagged ${ok.join(" or ")}, not ${e.tag ?? "untagged"}.`);
+    } else {
+      if (!e.tag || !["new", "followup", "removal"].includes(e.tag)) errors.push(`${e.ref}: a new task is tagged new, followup or removal.`);
+      if (e.tag === "followup" && !(e.depends_on ?? []).some((x) => byKey.get(x.ref)?.status === "Done"))
+        errors.push(`${e.ref}: a follow-up depends on the Done task it brings in line.`);
+      fresh.push(e);
+    }
+  }
+  for (const i of live) if (!seen.has(i.key)) errors.push(`${i.key} (${i.status}) is missing from the change set; tag it ${allowedTags(i, d).join(" or ")}.`);
+
+  const current = [...d.unchanged, ...d.changed, ...d.added];
+  const covered = new Set<string>();
+  for (const e of entries) {
+    if (e.tag === "cancel") continue;
+    const i = e.issue ? byKey.get(e.issue) : null;
+    const refs = e.issue && e.tag !== "update" ? (i?.requirement_refs ?? []) : (e.requirement_refs ?? []);
+    for (const r of refs) if (!(i?.status === "Done" && d.changed.includes(r))) covered.add(r);
+  }
+  for (const r of current) if (!covered.has(r)) errors.push(`Requirement ${r} is not covered by any task${d.changed.includes(r) ? " (a Done task covering a changed requirement needs a follow-up)" : ""}.`);
+  for (const e of entries) for (const r of e.requirement_refs ?? []) if (!current.includes(r)) errors.push(`${e.issue ?? e.ref} covers ${r}, which is not a current requirement.`);
+  if (errors.length) throw new FoundryError("TASKS_INVALID", `The change set was not recorded. Fix and resend:\n- ${errors.join("\n- ")}`, { errors });
+
+  const deps = [...live.map((i) => ({ key: i.key, touches: i.touches })), ...others];
+  return validateTasks(fresh, current, deps, [], { coverage: false });
 }
 
 export interface GraphResult {
@@ -73,7 +180,13 @@ export interface GraphResult {
  * are the refs every task list must cover. Throws TASKS_INVALID with every error, else returns the
  * waves, critical path, priorities and warnings.
  */
-export function validateTasks(tasks: ProposedTask[], requirements: string[], existing: { key: string; touches: string[] }[] = [], cut: string[] = []): GraphResult {
+export function validateTasks(
+  tasks: ProposedTask[],
+  requirements: string[],
+  existing: { key: string; touches: string[] }[] = [],
+  cut: string[] = [],
+  opts: { coverage?: boolean } = {},
+): GraphResult {
   const errors: string[] = [];
   const live = tasks.filter((t) => !cut.includes(t.ref));
   const refs = new Set<string>();
@@ -93,6 +206,7 @@ export function validateTasks(tasks: ProposedTask[], requirements: string[], exi
     }
     for (const r of t.requirement_refs ?? []) if (!reqSet.has(r)) errors.push(`${t.ref} covers ${r}, which is not a requirement of this spec.`);
   }
+  if (opts.coverage !== false)
   for (const r of requirements)
     if (!live.some((t) => (t.requirement_refs ?? []).includes(r))) errors.push(`Requirement ${r} is not covered by any task.`);
 
@@ -199,6 +313,12 @@ function findCycle(deps: Map<string, string[]>): string[] | null {
 export function renderTasks(title: string, tasks: ProposedTask[], g: GraphResult, cut: string[] = []): string {
   const byRef = new Map(tasks.map((t) => [t.ref, t]));
   const lines = [`# Tasks: ${title}`, "", "Written by Foundry from the PM's proposal. Edit tasks in Foundry, not here.", ""];
+  const existing = tasks.filter((t) => t.issue);
+  if (existing.length) {
+    lines.push("## Existing tasks", "", "| Task | Change | Covers |", "|---|---|---|");
+    for (const t of existing) lines.push(`| ${t.issue} | ${t.tag} | ${(t.requirement_refs ?? []).join(", ")} |`);
+    lines.push("");
+  }
   g.waves.forEach((w, i) => {
     lines.push(`## Wave ${i + 1}`, "", "| Ref | Task | Covers | Depends on | Size | Checks |", "|---|---|---|---|---|---|");
     for (const r of w) {
@@ -216,3 +336,34 @@ export function renderTasks(title: string, tasks: ProposedTask[], g: GraphResult
 }
 
 const esc = (s: string) => s.replace(/\|/g, "\\|").replace(/\n/g, " ");
+
+// ---------- spec.md's Requirements section ----------
+
+const REQ_START = "<!-- foundry:requirements (written by Foundry from the requirements it holds; edit them through Foundry) -->";
+const REQ_END = "<!-- /foundry:requirements -->";
+
+export function renderRequirements(reqs: { ref: string; title: string; criteria: string[] }[]): string {
+  const body = reqs.map((r) => [`### ${r.ref} ${r.title}`, "", ...r.criteria.map((c) => `- ${c}`)].join("\n")).join("\n\n");
+  return `${REQ_START}\n${body}\n${REQ_END}`;
+}
+
+/**
+ * Put Foundry's requirements into spec.md. Foundry owns the block between its markers; the first
+ * time, it takes over the ## Requirements section (to the next ## heading), or adds one. Write-only:
+ * nothing is read back from the doc.
+ */
+export function withRequirements(doc: string, block: string): string {
+  const s = doc.indexOf(REQ_START);
+  const e = doc.indexOf(REQ_END);
+  if (s >= 0 && e > s) return doc.slice(0, s) + block + doc.slice(e + REQ_END.length);
+  const lines = doc.split("\n");
+  const h = lines.findIndex((l) => /^##\s+Requirements\b/i.test(l));
+  if (h >= 0) {
+    let end = lines.findIndex((l, i) => i > h && /^##\s/.test(l));
+    if (end < 0) end = lines.length;
+    return [...lines.slice(0, h + 1), "", block, "", ...lines.slice(end)].join("\n");
+  }
+  const oos = lines.findIndex((l) => /^##\s+Out of scope\b/i.test(l));
+  const at = oos >= 0 ? oos : lines.length;
+  return [...lines.slice(0, at), "## Requirements", "", block, "", ...lines.slice(at)].join("\n");
+}
