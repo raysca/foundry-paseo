@@ -10,4 +10,8 @@
 - Every issue status change goes through `Store.setIssueStatus` (transition rules plus an event with
   its actor). Multi-row changes that must be all-or-nothing go through `Store.tx`.
 - Reviews and approvals are SHA-bound: an action names the SHA it was read at and is refused if it moved.
+- Installs and updates never corrupt or wipe an existing installation. Store migrations are
+  append-only (never edit or reorder a shipped one); the store backs up before upgrading, runs each
+  migration in its own transaction, and refuses a newer or foreign database untouched. Every new
+  migration is covered by `plugin/test/upgrade.test.ts` (it upgrades from every past schema).
 - Tests: `cd plugin && npm run typecheck && npm test`. The real-daemon smoke test is `bash e2e/smoke.sh`.
