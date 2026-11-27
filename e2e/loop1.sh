@@ -1,6 +1,7 @@
 #!/bin/bash
 # Loop 1 into loop 2 on a real daemon: a feature from an idea through a Clarify round answered late,
-# spec, plan and task list approved at their SHAs, then its two tasks run and are accepted.
+# spec, plan and task list approved at their SHAs, its two tasks run and are accepted, then Verify
+# fails a flaky check, passes when run again, and the feature ships into main by local merge.
 source "$(dirname "$0")/lib.sh"
 rm -rf "$WORK" && mkdir -p "$WORK" "$FOUNDRY_HOME"
 trap stop_daemon EXIT
@@ -52,7 +53,25 @@ accept SHT-2
 
 log "the feature branch has the docs and both tasks, and no stray PM writes"
 B=foundry/feature/$(q "print($(feat)['slug'])")
-git -C "$WORK/repo" show "$B:.foundry/features/shout-mode/tasks.md" | grep -q "Written by Foundry"
-git -C "$WORK/repo" show "$B:shout/cli.py" | grep -q '"-s"'
-git -C "$WORK/repo" log --format=%an "$B" | grep -q "Foundry PM"
+git -C "$WORK/repo" show "$B:.foundry/features/shout-mode/tasks.md" | grep "Written by Foundry" >/dev/null
+git -C "$WORK/repo" show "$B:shout/cli.py" | grep '"-s"' >/dev/null
+git -C "$WORK/repo" log --format=%an "$B" | grep "Foundry PM" >/dev/null
+verif() { echo "[v for v in d['verifications'] if v['feature_id']==$FID][0]"; }
+log "Build ends: Verify runs on the merged head; fail_once fails its first run there (no fix rounds in Verify)"
+wait_for "$(verif)['status']=='failed'" 300 "Verify failed"
+q "v=$(verif); assert v['failure']=='CHECKS_FAILED', v; print('CHECKS_FAILED')"
+q "r=[r for r in d['overview']['rows'] if r['id']==$FID][0]; assert r['delivery_label']=='Verify: 1 check failed', r; print(r['delivery_label'])"
+log "run Verify again: it passes and the feature moves to Ship"
+fact feature.verify "{\"id\":$FID}" | ok "Verify started"
+wait_for "$(feat)['stage']=='ship'" 300 "verified, in Ship"
+q "v=[v for v in d['verifications'] if v['feature_id']==$FID][0]; import json; print('checks', [(c['name'],c['status']) for c in json.loads(v['checks'])]); assert v['status']=='passed', v"
+
+log "prepare and accept the ship; main is checked out in the developer's checkout, so it needs confirming"
+PREP=$(fact feature.prepare_ship "{\"id\":$FID}")
+SHIP=$(echo "$PREP" | python3 -c "import json,sys;r=json.load(sys.stdin);assert 'error' not in r, r;print(json.dumps({'id':$FID,'head_sha':r['sha'],'tree_sha':r['tree']}))")
+fact feature.accept_ship "$SHIP" | python3 -c "import json,sys;r=json.load(sys.stdin);assert r['error']['code']=='BASE_CHECKED_OUT', r;print('BASE_CHECKED_OUT')"
+fact feature.accept_ship "$(echo "$SHIP" | python3 -c "import json,sys;r=json.load(sys.stdin);r['confirm']=True;print(json.dumps(r))")" \
+  | python3 -c "import json,sys;r=json.load(sys.stdin);assert 'merged' in r, r;print('shipped', r['merged'][:10])"
+q "assert $(feat)['stage']=='done'; print('feature Done')"
+grep -q '"-s"' "$WORK/repo/shout/cli.py"
 log "loop1 passed"

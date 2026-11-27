@@ -13,6 +13,8 @@ export interface FeatureRow {
   spec_changed: boolean;
   /** Before tasks exist: the planning stage instead of a percentage. */
   planning_label: string | null;
+  /** Verify and Ship show their own state, since every task is Done by then. */
+  delivery_label: string | null;
   progress: {
     percent: number | null;
     done: number;
@@ -63,6 +65,7 @@ export function featureRow(store: Store, f: Feature): FeatureRow {
   const docsInReview = store.docs(f.id).filter((x) => x.status === "in_review").length;
   const questions = store.get<{ n: number }>("SELECT COUNT(*) n FROM questions WHERE feature_id=? AND status IN ('live','waiting')", f.id)?.n ?? 0;
   const hasTasks = issues.length > 0;
+  const delivery = deliveryLabel(store, f);
   return {
     id: f.id,
     title: f.title,
@@ -72,9 +75,10 @@ export function featureRow(store: Store, f: Feature): FeatureRow {
     bucket: featureBucket(f.stage, !!f.spec_change_open, hasTasks),
     spec_changed: !!f.spec_change_open,
     planning_label: hasTasks ? null : planningLabel(store, f),
+    delivery_label: delivery.label,
     progress: { percent: hasTasks && totalW ? Math.round((100 * doneW) / totalW) : null, done: split.done, total: issues.length, split },
     coverage: { covered, total: reqs.length },
-    waiting_on_you: split.in_review + split.waiting + questions + docsInReview + (f.planning_error ? 1 : 0),
+    waiting_on_you: split.in_review + split.waiting + questions + docsInReview + (f.planning_error ? 1 : 0) + (delivery.waiting ? 1 : 0),
     planning_error: f.planning_error,
     updated_at: f.updated_at,
   };
@@ -85,6 +89,31 @@ function planningLabel(store: Store, f: Feature) {
   const kind = f.stage === "tasks" ? "tasks" : f.stage === "plan" ? "plan" : "spec";
   if (f.stage === "clarify") return "Clarify";
   return store.doc(f.id, kind)?.status === "in_review" ? `${name} in review` : `${name} being written`;
+}
+
+function deliveryLabel(store: Store, f: Feature): { label: string | null; waiting: boolean } {
+  if (f.stage !== "verify" && f.stage !== "ship") return { label: null, waiting: false };
+  const v = store.get<{ status: string; failure: string | null; checks: string; requirements: string }>(
+    "SELECT status, failure, checks, requirements FROM verifications WHERE feature_id=? ORDER BY id DESC LIMIT 1",
+    f.id,
+  );
+  if (f.stage === "ship") {
+    const prepared = !!store.setting(`ship:${f.id}`);
+    return { label: prepared ? "Ship prepared" : "Ready to ship", waiting: true };
+  }
+  if (!v || v.status === "running") return { label: "Verify running", waiting: false };
+  if (v.status === "passed") return { label: "Verified", waiting: false };
+  const reqs = parse<{ passed: boolean }[]>(v.requirements, []);
+  const failedChecks = parse<{ status: string }[]>(v.checks, []).filter((c) => c.status !== "passed").length;
+  const label =
+    v.failure === "REQUIREMENTS_FAILED"
+      ? `Verify: ${reqs.filter((r) => !r.passed).length} of ${reqs.length} requirements failed`
+      : v.failure === "CHECKS_FAILED"
+        ? `Verify: ${failedChecks} check${failedChecks === 1 ? "" : "s"} failed`
+        : v.failure === "BASE_CONFLICT"
+          ? "Verify: base conflicts"
+          : `Verify failed (${v.failure})`;
+  return { label, waiting: true };
 }
 
 /** The features list for a project: buckets with counts, rows sorted by stage then last activity. */

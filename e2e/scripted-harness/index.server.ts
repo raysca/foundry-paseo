@@ -162,6 +162,13 @@ async function script(s: Session, text: string): Promise<string> {
   }
   if (probe === "verdict_for_other") return call(s, "report_verdict", { decision: "fail", reason: "cross-task", issue_key: /ISSUE:(\S+)/.exec(text)?.[1] });
 
+  // Verify: the reviewer reports on every requirement listed in its prompt.
+  if (text.includes("reviewer verifying the feature")) {
+    const refs = [...text.matchAll(/^- (R[\d.]+) /gm)].map((m) => m[1]!);
+    const r = await call(s, "report_requirements", { results: refs.map((ref) => ({ requirement_ref: ref, passed: true, evidence: `Read the code and tests for ${ref}.` })) });
+    return `Reported ${refs.length} requirements. ${r}`;
+  }
+
   // Loop 1 planner (the PM in a feature's integration worktree).
   const dir = /Write only under (\S+)\//.exec(text)?.[1];
   if (dir) s.featureDir = dir;

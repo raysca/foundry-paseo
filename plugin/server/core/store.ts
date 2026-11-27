@@ -328,6 +328,13 @@ const MIGRATIONS: string[] = [
      criteria TEXT NOT NULL DEFAULT '[]', PRIMARY KEY(feature_id, ref));
    INSERT INTO approved_requirements(feature_id,ref,title,criteria)
      SELECT feature_id,ref,title,criteria FROM requirements WHERE retired=0 AND spec_sha IS NOT NULL;`,
+  // 5: Verify runs (checks on the merged head plus the reviewer's per-requirement report)
+  `CREATE TABLE verifications (
+     id INTEGER PRIMARY KEY, feature_id INTEGER NOT NULL REFERENCES features(id), head_sha TEXT,
+     status TEXT NOT NULL DEFAULT 'running', failure TEXT, checks TEXT NOT NULL DEFAULT '[]',
+     requirements TEXT NOT NULL DEFAULT '[]', workspace_id TEXT, path TEXT, reviewer_agent_id TEXT,
+     created_at TEXT NOT NULL DEFAULT (datetime('now')), ended_at TEXT);
+   CREATE INDEX verifications_feature ON verifications(feature_id);`,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;

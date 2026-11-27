@@ -91,6 +91,8 @@ export default function contribute(server: PluginServerContext) {
       requirements: store.all("SELECT * FROM requirements WHERE retired=0 ORDER BY feature_id, ref"),
       proposals: store.all("SELECT * FROM task_proposals WHERE status IN ('proposed','approved') ORDER BY id DESC LIMIT 50"),
       questions: store.all("SELECT * FROM questions WHERE status IN ('live','waiting') ORDER BY id"),
+      verifications: store.all("SELECT * FROM verifications WHERE id IN (SELECT MAX(id) FROM verifications GROUP BY feature_id)"),
+      ships: store.all("SELECT key, value FROM settings WHERE key LIKE 'ship:%' AND value<>''"),
       events: store.events({ limit: 200 }),
     })),
   );
@@ -105,7 +107,7 @@ export default function contribute(server: PluginServerContext) {
         case "issue.start":
           return foundry.startIssue(String(args.key));
         case "issue.accept":
-          return foundry.tasks.accept(String(args.key), String(args.head_sha), String(args.tree_sha), "you", String(args.feedback ?? ""));
+          return foundry.accept(String(args.key), String(args.head_sha), String(args.tree_sha), "you", String(args.feedback ?? ""));
         case "issue.rework":
           return foundry.tasks.rework(String(args.key), String(args.head_sha), String(args.tree_sha), String(args.feedback ?? ""));
         case "issue.followup":
@@ -144,6 +146,16 @@ export default function contribute(server: PluginServerContext) {
           return foundry.planning.setStatus(Number(args.id), "active");
         case "feature.cancel":
           return foundry.planning.setStatus(Number(args.id), "cancelled");
+        case "feature.verify":
+          return foundry.delivery.verify(Number(args.id), "you", args.force === true);
+        case "feature.ship_with_gaps":
+          return foundry.delivery.shipWithGaps(Number(args.id));
+        case "feature.task_from_failure":
+          return foundry.delivery.taskFromFailure(Number(args.id), String(args.title ?? ""), String(args.description ?? ""), Array.isArray(args.requirement_refs) ? args.requirement_refs.map(String) : []);
+        case "feature.prepare_ship":
+          return foundry.delivery.prepare(Number(args.id));
+        case "feature.accept_ship":
+          return foundry.delivery.acceptShip(Number(args.id), String(args.head_sha), String(args.tree_sha), { confirmCheckedOut: args.confirm === true });
         case "question.answer":
           return foundry.tasks.answer(Number(args.id), String(args.text ?? ""));
         case "dev.seed_feature":

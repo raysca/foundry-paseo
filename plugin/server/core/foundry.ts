@@ -8,6 +8,7 @@ import { checkSetup, setupReady, type Finding } from "./setup";
 import type { Store } from "./store";
 import { TaskLoop, type LoopSettings } from "./taskloop";
 import { Planning } from "./planning";
+import { Delivery } from "./delivery";
 
 export interface FoundryConfig {
   /** Where Foundry keeps its own files (store). Worktrees are Paseo's. */
@@ -23,6 +24,7 @@ export class Foundry {
   readonly locks = new Locks();
   readonly tasks: TaskLoop;
   readonly planning: Planning;
+  readonly delivery: Delivery;
   private timer: NodeJS.Timeout | null = null;
 
   constructor(
@@ -61,8 +63,32 @@ export class Foundry {
         },
       },
       () => this.requireSetup(),
-      () => this.tasks.tick(),
+      () => this.tick(),
     );
+    this.delivery = new Delivery(
+      store,
+      host,
+      this.locks,
+      {
+        get checkTimeoutMs() {
+          return settings().checkTimeoutMs;
+        },
+      },
+      () => this.tick(),
+    );
+  }
+
+  /** One scheduler pass: start Ready work, then move features whose Build has ended to Verify. */
+  async tick() {
+    await this.tasks.tick();
+    await this.delivery.checkBuildDone();
+  }
+
+  /** Accept a task; the last accepted task of a feature ends its Build. */
+  async accept(key: string, headSha: string, treeSha: string, actor: Actor = "you", feedback = "") {
+    const r = await this.tasks.accept(key, headSha, treeSha, actor, feedback);
+    await this.delivery.checkBuildDone();
+    return r;
   }
 
   stop() {
@@ -98,9 +124,10 @@ export class Foundry {
     await this.runSetupCheck();
     await this.planning.recover();
     await this.tasks.recover();
+    await this.delivery.recover();
     const ms = this.cfg.tickMs ?? 2000;
     if (ms > 0 && !this.timer)
-      this.timer = setInterval(() => void this.tasks.tick().catch((e) => this.store.event("tick_error", { detail: { error: String(e) } })), ms);
+      this.timer = setInterval(() => void this.tick().catch((e) => this.store.event("tick_error", { detail: { error: String(e) } })), ms);
   }
 
   // ---------- actions ----------
@@ -120,6 +147,7 @@ export class Foundry {
   }
 
   async onTurnEnd(agentId: string, outcome: { kind: string; message?: string }, tracked: boolean) {
+    if (this.delivery.isVerifier(agentId)) return this.delivery.onTurnEnd(agentId, outcome);
     const a = this.store.agent(agentId);
     if (a && (a.role === "builder" || a.role === "reviewer")) return this.tasks.onTurnEnd(agentId, outcome, tracked);
     if (a?.role === "planner") return this.planning.onTurnEnd(agentId, outcome, tracked);
