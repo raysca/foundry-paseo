@@ -3,7 +3,7 @@
 // code itself apart from merging base. Ship (local merge in M1) merges the feature into base at the SHA
 // you read, under the base-integration rule.
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { filesFromBase, paseoScripts, resolveChecks, tail, type ResolvedChecks, type TaskChecks } from "./checks";
@@ -319,7 +319,8 @@ export class Delivery {
         }
       } else {
         if ((await changedPaths(where)).length) throw new FoundryError("BASE_DIRTY", `${p.base_ref} is checked out at ${where} with uncommitted changes`, { path: where });
-        const owned = this.store.ownedPaths().includes(where);
+        // git reports real paths (on macOS /private/var/... for /var/...), so compare real paths.
+        const owned = this.store.ownedPaths().some((x) => real(x) === real(where));
         if (!owned && !o.confirmCheckedOut) throw new FoundryError("BASE_CHECKED_OUT", `${p.base_ref} is checked out at ${where}. Confirm to merge there.`, { path: where });
         mergedAt = await mergeInto(where, headSha, msg);
       }
@@ -366,6 +367,14 @@ async function mergeInto(path: string, sha: string, message: string) {
     throw new FoundryError("MERGE_CONFLICT", `Merging into base conflicts in: ${conflicts.join(", ")}. Run Verify again to merge base in and see it.`, { paths: conflicts });
   }
   return head(path);
+}
+
+function real(p: string) {
+  try {
+    return realpathSync(p);
+  } catch {
+    return p;
+  }
 }
 
 /** The worktree where a branch is checked out, if any. */

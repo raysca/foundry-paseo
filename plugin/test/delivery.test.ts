@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Store, parse } from "../server/core/store";
 import { Foundry } from "../server/core/foundry";
@@ -131,7 +131,7 @@ test("Build ends, Verify passes on the merged head and the feature ships by loca
   writeFileSync(join(repo, "README.md"), "local edit\n");
   await assert.rejects(foundry.delivery.acceptShip(fid, prep.sha, prep.tree, { confirmCheckedOut: true }), code("BASE_DIRTY"));
   run(repo, "git", "checkout", "-q", "--", "README.md");
-  await assert.rejects(foundry.delivery.acceptShip(fid, prep.sha, prep.tree), (e) => code("BASE_CHECKED_OUT")(e) && (e as FoundryError).detail?.path === repo);
+  await assert.rejects(foundry.delivery.acceptShip(fid, prep.sha, prep.tree), (e) => code("BASE_CHECKED_OUT")(e) && realpathSync(String((e as FoundryError).detail?.path)) === realpathSync(repo));
   const shipped = await foundry.delivery.acceptShip(fid, prep.sha, prep.tree, { confirmCheckedOut: true });
   assert.equal(shipped.pushed, null);
   assert.equal(run(repo, "git", "rev-parse", "HEAD"), shipped.merged);
