@@ -51,6 +51,13 @@ export interface Feature {
   integration_path: string | null;
   planner_agent_id: string | null;
   spec_change_open: number;
+  /** The feature branch head Foundry last wrote; anything else at accept means a merge outside Foundry. */
+  head_sha: string | null;
+  /** none | light | normal; null means light. */
+  grill: string | null;
+  clarify_rounds: number;
+  /** Why the PM's last planning turn failed, until a turn succeeds. */
+  planning_error: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -161,6 +168,22 @@ export interface Question {
   answer: string | null;
   asked_at: string;
   answered_at: string | null;
+  /** Clarify questions: the PM's id for the question, its recommended answer and the round. */
+  qkey: string | null;
+  recommended: string | null;
+  round: number | null;
+}
+
+export interface TaskProposal {
+  id: number;
+  feature_id: number;
+  kind: string;
+  tasks: string; // JSON ProposedTask[]
+  tasks_sha: string | null;
+  status: "proposed" | "superseded" | "approved";
+  result: string; // JSON: waves, critical path, warnings
+  cut: string; // JSON string[] of cut refs
+  created_at: string;
 }
 
 export interface Card {
@@ -274,6 +297,17 @@ const MIGRATIONS: string[] = [
   CREATE INDEX attempts_issue ON attempts(issue_key);
   CREATE INDEX runs_attempt ON runs(attempt_id);
   `,
+  // 2: the feature branch head Foundry last wrote, to catch merges made outside Foundry
+  `ALTER TABLE features ADD COLUMN head_sha TEXT;`,
+  // 3: planning (loop 1): Clarify rounds, grill level, planning failures, task proposal results
+  `ALTER TABLE features ADD COLUMN grill TEXT;
+   ALTER TABLE features ADD COLUMN clarify_rounds INTEGER NOT NULL DEFAULT 0;
+   ALTER TABLE features ADD COLUMN planning_error TEXT;
+   ALTER TABLE questions ADD COLUMN qkey TEXT;
+   ALTER TABLE questions ADD COLUMN recommended TEXT;
+   ALTER TABLE questions ADD COLUMN round INTEGER;
+   ALTER TABLE task_proposals ADD COLUMN result TEXT NOT NULL DEFAULT '{}';
+   ALTER TABLE task_proposals ADD COLUMN cut TEXT NOT NULL DEFAULT '[]';`,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
@@ -449,7 +483,28 @@ export class Store {
       `SELECT * FROM requirements WHERE feature_id=? ${includeRetired ? "" : "AND retired=0"} ORDER BY ref`,
       featureId,
     );
+  }  /** Replace a feature's live requirements (propose_requirements). */
+  setRequirements(featureId: number, reqs: { ref: string; title: string; criteria: string[] }[], specSha: string | null) {
+    this.tx(() => {
+      this.run("DELETE FROM requirements WHERE feature_id=? AND retired=0", featureId);
+      for (const r of reqs)
+        this.run("INSERT OR REPLACE INTO requirements(feature_id,ref,title,criteria,spec_sha,retired) VALUES(?,?,?,?,?,0)", featureId, r.ref, r.title, json(r.criteria), specSha);
+    });
   }
+  proposal(featureId: number) {
+    return this.get<TaskProposal>("SELECT * FROM task_proposals WHERE feature_id=? AND status='proposed' ORDER BY id DESC LIMIT 1", featureId);
+  }
+  proposals(featureId: number) {
+    return this.all<TaskProposal>("SELECT * FROM task_proposals WHERE feature_id=? ORDER BY id", featureId);
+  }
+  addProposal(featureId: number, tasks: unknown, result: unknown, kind = "initial"): TaskProposal {
+    return this.tx(() => {
+      this.run("UPDATE task_proposals SET status='superseded' WHERE feature_id=? AND status='proposed'", featureId);
+      const r = this.run("INSERT INTO task_proposals(feature_id,kind,tasks,result) VALUES(?,?,?,?)", featureId, kind, json(tasks), json(result));
+      return this.get<TaskProposal>("SELECT * FROM task_proposals WHERE id=?", Number(r.lastInsertRowid))!;
+    });
+  }
+
 
   // ---------- issues ----------
   /** Allocate the next issue key for a project (KEY-n). */

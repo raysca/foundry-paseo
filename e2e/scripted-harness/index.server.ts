@@ -12,7 +12,7 @@ import { negotiateProviderCapabilities } from "@getpaseo/plugin/server/provider"
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { mkdirSync, writeFileSync, existsSync, readFileSync, appendFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, readFileSync, appendFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 
 const CAPS = ["prompt.message", "session.persistence", "permission"] as const;
@@ -24,6 +24,8 @@ interface Session {
   turn: number;
   mcp: Client[] | null;
   tools: Map<string, Client>;
+  /** The feature folder a planning session may write in, from its first prompt. */
+  featureDir?: string;
 }
 
 export default function contribute(server: PluginServerContext) {
@@ -89,6 +91,7 @@ function connection(capabilities: readonly string[]): ProviderConnection {
         if (input.prompt.input.type !== "message") return;
         const text = input.prompt.input.content.filter((p) => p.type === "text").map((p) => (p as { text: string }).text).join("\n");
         s.turn++;
+        log(`turn ${input.sessionId} #${s.turn} cwd=${s.config.cwd}: ${text.slice(0, 120).replace(/\n/g, " ")}`);
         const turnId = `${input.sessionId}-t${s.turn}`;
         emit({ type: "timeline.item", sessionId: input.sessionId, item: { type: "user_message", id: `u${s.turn}`, text, clientMessageId: input.prompt.clientMessageId } });
         emit({ type: "session.prompt_result", sessionId: input.sessionId, clientMessageId: input.prompt.clientMessageId, result: { type: "turn", turnId } });
@@ -157,47 +160,76 @@ async function script(s: Session, text: string): Promise<string> {
     write(cwd, "PROBE_WRITE.txt", "written by a turn the host user started\n");
     return "wrote PROBE_WRITE.txt";
   }
-  if (probe === "verdict_for_other") return call(s, "report_verdict", { verdict: "pass", summary: "cross-task", issue_key: /ISSUE:(\S+)/.exec(text)?.[1] });
+  if (probe === "verdict_for_other") return call(s, "report_verdict", { decision: "fail", reason: "cross-task", issue_key: /ISSUE:(\S+)/.exec(text)?.[1] });
 
-  if (text.includes("planning a Quick-flow feature")) {
-    const dir = /(\.foundry\/features\/[\w-]+)\/spec\.md/.exec(text)![1]!;
-    write(cwd, `${dir}/spec.md`, "# Shout mode\n\nshout(text) upper-cases and adds !; CLI gets --shout.\n");
-    write(cwd, `${dir}/plan.md`, "# Plan\n\n1. core.shout\n2. CLI flag\n");
-    write(cwd, `${dir}/tasks.md`, "| key | title | depends on |\n|---|---|---|\n| A | Add shout() | |\n| B | Add --shout flag | A |\n");
-    if (existsSync(join(cwd, ".foundry/PROBE_P10"))) write(cwd, "STRAY.md", "planner wrote outside the feature folder\n");
-    const r = await call(s, "propose_tasks", {
-      tasks: [
-        { key: "A", title: "Add shout(text) to shout/core.py with tests", body: "shout(text) returns text.upper() + '!'", depends_on: [] },
-        { key: "B", title: "Add --shout flag to the CLI with a test", body: "Use shout(). Ask the human whether -s should also work.", depends_on: ["A"] },
-      ],
-    });
-    return `Planned. ${r}`;
-  }
-  if (text.includes("Foundry builder working on") && /-A:/.test(text)) {
+  // Loop 1 planner (the PM in a feature's integration worktree).
+  const dir = /Write only under (\S+)\//.exec(text)?.[1];
+  if (dir) s.featureDir = dir;
+  if (s.featureDir) return plan(s, s.featureDir, text);
+
+  // Loop 2 builder. Task titles decide what the scripted builder does.
+  const task = /Foundry builder working on (\S+): (.*)/.exec(text);
+  if (task && /shout\(\)/.test(task[2]!)) {
     write(cwd, "shout/core.py", "def shout(text):\n    return text.upper() + \"!\"\n");
     write(cwd, "tests/test_core.py", "import unittest\n\nfrom shout.core import shout\n\n\nclass ShoutTest(unittest.TestCase):\n    def test_shout(self):\n        self.assertEqual(shout(\"hi\"), \"HI!\")\n");
-    if (existsSync(join(cwd, "poc/PROBE_P7"))) write(cwd, "poc/fail_once.sh", "#!/bin/sh\nexit 0\n");
     return "Added shout() with a test.";
   }
-  if (text.includes("Foundry builder working on") && /-B:/.test(text) || text.includes("ask me again")) {
+  if ((task && /flag/.test(task[2]!)) || text.includes("ask me again")) {
     const ans = await call(s, "ask_human", { question: "Should the --shout flag also accept -s?" });
-    if (ans.startsWith("No answer")) return "Stopped: waiting for the human on -s.";
+    if (ans.startsWith("Your question is waiting")) return "Stopped: waiting for the developer on -s.";
     return implementB(cwd, ans);
   }
   if (text.startsWith("Answer to your earlier question")) return implementB(cwd, text);
-  if (text.includes("Foundry check")) return "Looked at the failing check; nothing in my change causes it. Ending turn.";
-  if (text.includes("Foundry's reviewer")) {
+  if (text.startsWith("Foundry's checks failed")) return "Looked at the failing check; nothing in my change causes it. Ending turn.";
+  if (text.includes("merge conflict")) return "Nothing to merge by hand.";
+  if (text.includes("Foundry's reviewer for")) {
     const key = /reviewer for (\S+):/.exec(text)?.[1];
-    return call(s, "report_verdict", { verdict: "pass", summary: `Looks right for ${key}.` });
-  }
-  if (text.includes("Foundry's PM for this project")) return "ready";
-  if (/blocking B/i.test(text)) {
-    const board = await call(s, "foundry_board", {});
-    const b = JSON.parse(board).issues?.find((i: { key: string }) => i.key.endsWith("-B"));
-    const card = await call(s, "propose_card", { kind: "set_priority", issue_key: b?.key ?? "X-B", priority: 5, reason: "B was blocked on the -s question; finish it next." });
-    return `B (${b?.key}) was blocked by its dependency on A and then by your answer about -s. Next: ${b?.key}. ${card}`;
+    return call(s, "report_verdict", { decision: "pass", reason: `Looks right for ${key}.` });
   }
   return `echo: ${text.slice(0, 80)}`;
+}
+
+async function plan(s: Session, dir: string, text: string): Promise<string> {
+  const cwd = s.config.cwd;
+  if (text.includes("call propose_tasks")) {
+    const r = await call(s, "propose_tasks", {
+      tasks: [
+        { ref: "T1", title: "Add shout() to shout/core.py with tests", requirement_refs: ["R1"], touches: ["shout/core.py"], size: "S", checks: { scripts: ["unittest"] } },
+        {
+          ref: "T2",
+          title: "Add --shout flag to the CLI with a test",
+          requirement_refs: ["R2"],
+          depends_on: [{ ref: "T1", reason: "the flag calls shout()" }],
+          touches: ["shout/cli.py"],
+          size: "S",
+        },
+      ],
+    });
+    return `Proposed the task graph. ${r}`;
+  }
+  if (text.includes("plan.md with")) {
+    write(cwd, `${dir}/plan.md`, "# Plan\n\n## Approach\nshout() in core, a flag in the CLI.\n\n## Files and components\n- shout/core.py\n- shout/cli.py\n\n## Data and API changes\nNone.\n\n## Risks\nNone.\n\n## Test strategy\nunittest.\n");
+    return "Wrote plan.md.";
+  }
+  if (text.includes("Step 1, Clarify")) {
+    const ans = await call(s, "ask_questions", { questions: [{ id: "short_flag", text: "Should --shout also accept -s?", recommended: "yes" }] });
+    if (ans.startsWith("The developer hasn't answered")) return "Waiting for the developer's answers.";
+  }
+  if (text.includes("Step 2")) {
+    write(
+      cwd,
+      `${dir}/spec.md`,
+      "# Shout mode\n\n## Goal\nLet the CLI shout.\n\n## User stories\nAs a user I can shout.\n\n## Requirements\n\nR1 Shout\n- WHEN shout(text) is called THE library SHALL return text upper-cased with ! appended\n\nR2 CLI flag\n- WHERE --shout is given THE CLI SHALL print the shouted text\n\n## Out of scope\nWhispering.\n\n## Decisions\n- See the answers.\n",
+    );
+    const r = await call(s, "propose_requirements", {
+      requirements: [
+        { ref: "R1", title: "Shout", acceptance_criteria: ["WHEN shout(text) is called THE library SHALL return text upper-cased with ! appended"] },
+        { ref: "R2", title: "CLI flag", acceptance_criteria: ["WHERE --shout is given THE CLI SHALL print the shouted text"] },
+      ],
+    });
+    return `Wrote spec.md. ${r}`;
+  }
+  return `planner echo: ${text.slice(0, 80)}`;
 }
 
 function implementB(cwd: string, answer: string) {

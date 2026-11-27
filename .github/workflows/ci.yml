@@ -23,7 +23,8 @@ jobs:
 
   e2e:
     # A real Paseo daemon with the scripted harness: the plugin loads, attaches with no client
-    # open, and its setup check passes on a good daemon and names what's missing on a broken one.
+    # open, its setup check passes on a good daemon and names what's missing on a broken one, and loop 2
+    # runs two tasks end to end.
     runs-on: ubuntu-latest
     needs: unit
     steps:
@@ -33,6 +34,10 @@ jobs:
           node-version: 22
       - name: zsh (Paseo reports script exit codes only under zsh)
         run: sudo apt-get update && sudo apt-get install -y zsh
+      - name: quiet zsh startup (compinit's insecure-directories prompt eats the first command Paseo types)
+        run: |
+          echo 'skip_global_compinit=1' >> ~/.zshenv
+          zsh -c 'autoload -Uz compaudit; compaudit' 2>/dev/null | xargs -r sudo chmod g-w,o-w
       - run: npm ci
         working-directory: plugin
       - run: npm ci
@@ -41,6 +46,13 @@ jobs:
         working-directory: e2e/scripted-harness
       - run: git config --global user.email ci@localhost && git config --global user.name CI
       - run: bash e2e/smoke.sh
+      - name: loop 2 (two tasks through build, checks, a fix round, review, a late answer and accept)
+        run: bash e2e/loop2.sh
+      - name: loop 1 into loop 2 (idea, Clarify, spec, plan and task list approved, tasks run and accepted)
+        run: bash e2e/loop1.sh
+      - name: scripted harness log on failure
+        if: failure()
+        run: tail -100 "${TMPDIR:-/tmp}/foundry-e2e/scripted.log" || true
       - name: daemon log on failure
         if: failure()
         run: tail -200 "${TMPDIR:-/tmp}/foundry-e2e/paseo-home/daemon.log" || true

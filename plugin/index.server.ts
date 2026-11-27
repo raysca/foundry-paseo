@@ -48,7 +48,10 @@ export default function contribute(server: PluginServerContext) {
     },
   });
   const adapter = new PaseoAdapter(server, paseo, store, adapterCfg);
-  const foundry = new Foundry(store, adapter, { home });
+  const foundry = new Foundry(store, adapter, {
+    home,
+    loop: () => ({ maxFixRounds: settings.maxFixRounds, questionWindowMs: settings.questionWindowSeconds * 1000, checkTimeoutMs: 10 * 60_000 }),
+  });
   let started = false;
   const attach = (p: PaseoApi, via: string) => {
     current = p;
@@ -80,6 +83,12 @@ export default function contribute(server: PluginServerContext) {
       projects: store.projects(),
       features: store.features(),
       issues: store.issues(),
+      attempts: store.all("SELECT * FROM attempts ORDER BY id DESC LIMIT 200"),
+      runs: store.all("SELECT * FROM runs ORDER BY id DESC LIMIT 200"),
+      docs: store.all("SELECT * FROM feature_docs ORDER BY feature_id, kind"),
+      requirements: store.all("SELECT * FROM requirements WHERE retired=0 ORDER BY feature_id, ref"),
+      proposals: store.all("SELECT * FROM task_proposals WHERE status IN ('proposed','approved') ORDER BY id DESC LIMIT 50"),
+      questions: store.all("SELECT * FROM questions WHERE status IN ('live','waiting') ORDER BY id"),
       events: store.events({ limit: 200 }),
     })),
   );
@@ -91,6 +100,50 @@ export default function contribute(server: PluginServerContext) {
           return store.createProject({ key: String(args.key), name: String(args.name ?? args.key), repo: String(args.repo), baseRef: String(args.baseRef ?? "main") });
         case "setup.check":
           return foundry.runSetupCheck();
+        case "issue.start":
+          return foundry.startIssue(String(args.key));
+        case "issue.accept":
+          return foundry.tasks.accept(String(args.key), String(args.head_sha), String(args.tree_sha), "you", String(args.feedback ?? ""));
+        case "issue.rework":
+          return foundry.tasks.rework(String(args.key), String(args.head_sha), String(args.tree_sha), String(args.feedback ?? ""));
+        case "issue.followup":
+          return foundry.tasks.followUp(String(args.key), String(args.text ?? ""));
+        case "feature.create":
+          return foundry.planning.createFeature({
+            projectId: Number(args.project_id ?? store.projectByKey(String(args.project))?.id),
+            idea: String(args.idea ?? ""),
+            title: args.title ? String(args.title) : undefined,
+            flow: args.flow,
+            grill: args.grill ?? null,
+          });
+        case "feature.doc":
+          return foundry.planning.readDoc(Number(args.id), args.kind);
+        case "feature.answer":
+          return foundry.planning.answer(Number(args.id), args.answers ?? {});
+        case "feature.approve_spec":
+          return foundry.planning.approveSpec(Number(args.id), String(args.sha));
+        case "feature.approve_plan":
+          return foundry.planning.approvePlan(Number(args.id), String(args.sha));
+        case "feature.approve_tasks":
+          return foundry.planning.approveTasks(Number(args.id), Number(args.proposal), String(args.sha));
+        case "feature.cut_task":
+          return foundry.planning.cutTask(Number(args.id), String(args.ref), args.cut !== false);
+        case "feature.revise":
+          return foundry.planning.revise(Number(args.id), args.kind, String(args.note ?? ""));
+        case "feature.retry":
+          return foundry.planning.retry(Number(args.id));
+        case "feature.pause":
+          return foundry.planning.setStatus(Number(args.id), "paused");
+        case "feature.resume":
+          return foundry.planning.setStatus(Number(args.id), "active");
+        case "feature.cancel":
+          return foundry.planning.setStatus(Number(args.id), "cancelled");
+        case "question.answer":
+          return foundry.tasks.answer(Number(args.id), String(args.text ?? ""));
+        case "dev.seed_feature":
+          // Test-only until Loop 1 lands: a feature already planned and approved, with its tasks.
+          if (process.env.FOUNDRY_DEV !== "1") throw new FoundryError("UNKNOWN_ACTION", `Unknown action ${action}`);
+          return seedFeature(foundry, args as SeedArgs);
         default:
           throw new FoundryError("UNKNOWN_ACTION", `Unknown action ${action}`);
       }
@@ -120,9 +173,38 @@ export default function contribute(server: PluginServerContext) {
 
   return async () => {
     if (kickTimer) clearTimeout(kickTimer);
+    foundry.stop();
     unsubSettings();
     removeHooks();
     await adapter.close();
     store.close();
   };
+}
+
+interface SeedArgs {
+  project: string;
+  slug: string;
+  title: string;
+  tasks: { title: string; description?: string; depends_on?: number[] }[];
+}
+
+async function seedFeature(foundry: Foundry, a: SeedArgs) {
+  const store = foundry.store;
+  const p = store.projectByKey(a.project);
+  if (!p) throw new FoundryError("NOT_FOUND", `No project ${a.project}`);
+  const f = store.createFeature({ projectId: p.id, slug: a.slug, title: a.title, idea: a.title, flow: "standard", branch: `foundry/feature/${a.slug}` });
+  for (const d of store.docs(f.id)) store.updateDoc(f.id, d.kind, { status: "approved" });
+  await foundry.ensureIntegration(f.id);
+  const keys = store.tx(() => {
+    const keys: string[] = [];
+    for (const t of a.tasks) {
+      const deps = (t.depends_on ?? []).map((n) => keys[n]!);
+      const i = store.createIssue({ projectId: p.id, featureId: f.id, origin: "feature", title: t.title, description: t.description ?? "", status: deps.length ? "Backlog" : "Ready" });
+      for (const d of deps) store.addDep(i.key, d);
+      keys.push(i.key);
+    }
+    store.setStage(f.id, "build", "you");
+    return keys;
+  });
+  return { feature: store.feature(f.id), issues: keys };
 }
