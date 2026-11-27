@@ -106,3 +106,26 @@ test("owned paths cover integration checkouts and live check checkouts", () => {
   s.updateAttempt(a.id, { ended_at: new Date().toISOString() });
   assert.deepEqual(s.ownedPaths(), ["/wt/int"]);
 });
+
+test("a database another program made is refused and left untouched; Foundry's own reopens", async () => {
+  const { mkdtempSync, readFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { DatabaseSync } = await import("node:sqlite");
+  const dir = mkdtempSync(join(tmpdir(), "foundry-store-"));
+  const foreign = join(dir, "old.db");
+  const db = new DatabaseSync(foreign);
+  db.exec("CREATE TABLE settings (k TEXT); INSERT INTO settings VALUES ('x');");
+  db.close();
+  const before = readFileSync(foreign);
+  assert.throws(() => new Store(foreign), (e: any) => e.code === "STORE_FOREIGN" && /another program/.test(e.message));
+  assert.deepEqual(readFileSync(foreign), before, "the foreign file is not modified");
+
+  const mine = join(dir, "foundry.db");
+  const s = new Store(mine);
+  s.createProject({ key: "SHT", name: "Shout", repo: "/tmp/x", baseRef: "main" });
+  s.close();
+  const again = new Store(mine);
+  assert.equal(again.projects().length, 1);
+  again.close();
+});

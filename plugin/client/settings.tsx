@@ -5,7 +5,7 @@ import { SettingsAction, SettingsInput, SettingsSection } from "@getpaseo/plugin
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { Text, View } from "react-native";
-import { setupRpc } from "../shared/rpc";
+import { actionRpc, setupRpc } from "../shared/rpc";
 import { foundrySettings } from "../shared/settings";
 
 type Finding = { level: "ok" | "info" | "warn" | "error"; code: string; message: string; fix?: string };
@@ -13,6 +13,8 @@ const MARK: Record<Finding["level"], string> = { ok: "OK", info: "Note", warn: "
 
 export function FoundrySettingsScreen(_: PluginSurfaceProps) {
   const setup = useRpc(setupRpc);
+  const action = useRpc(actionRpc);
+  const [creating, setCreating] = useState<string | null>(null);
   const qc = useQueryClient();
   const check = useQuery({ queryKey: ["foundry-setup"], queryFn: () => setup({}) as Promise<{ findings: Finding[] }> });
   const st = useSettings(foundrySettings);
@@ -29,6 +31,20 @@ export function FoundrySettingsScreen(_: PluginSurfaceProps) {
             {f.fix ? <Text style={{ opacity: 0.7 }}>{f.fix}</Text> : null}
           </View>
         ))}
+        {findings.some((f) => f.code === "PROFILE_MISSING") ? (
+          <SettingsAction
+            label={creating ?? "Adds only the missing foundry-* profiles and the foundry-claude provider. Existing profiles are never changed."}
+            actionLabel="Create Foundry's profiles"
+            disabled={creating === "Creating…"}
+            onPress={() => {
+              setCreating("Creating…");
+              void (action({ action: "setup.create_profiles", args: {} }) as Promise<any>)
+                .then((r) => setCreating(r?.error ? `${r.error.code}: ${r.error.message}` : `Added: ${(r?.added ?? []).join(", ") || "nothing"}`))
+                .catch((e) => setCreating(String(e?.message ?? e)))
+                .finally(() => void qc.invalidateQueries({ queryKey: ["foundry-setup"] }));
+            }}
+          />
+        ) : null}
         <SettingsAction
           label={check.isFetching ? "Checking" : "Roles come from Paseo agent profiles named foundry-builder, foundry-reviewer, foundry-planner and foundry-pm"}
           actionLabel="Check again"

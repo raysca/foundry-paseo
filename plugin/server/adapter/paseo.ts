@@ -10,6 +10,7 @@ import type { AgentSpec, AgentStatus, Host, HostFacts, HostProfile, ScriptResult
 import type { Role } from "../core/model";
 import type { Store } from "../core/store";
 import { profileId, roleProfile } from "../core/setup";
+import { missingProfilesPatch, type ProfileOptions } from "./profiles";
 
 /** What the adapter reports back to Foundry's core. */
 export interface HostEvents {
@@ -140,6 +141,14 @@ export class PaseoAdapter implements Host {
       shell: process.env.SHELL ?? null,
       paseoVersion: null,
     };
+  }
+
+  async addMissingProfiles(o: ProfileOptions): Promise<string[]> {
+    const config = await this.daemonConfig();
+    if (!config) throw new Error("Could not read Paseo's settings");
+    const { patch, added } = missingProfilesPatch(config as never, o);
+    if (added.length) await this.paseo.config.patch(patch as never);
+    return added;
   }
 
   private async profileFor(role: Role, override?: string | null): Promise<HostProfile> {

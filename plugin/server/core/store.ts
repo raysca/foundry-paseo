@@ -1,8 +1,8 @@
 // Foundry's durable store: SQLite in the plugin process (node:sqlite). Host-independent.
 // The schema follows the behaviour spec's domain model. Migrations are numbered and only ever appended.
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
-import { mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import {
   assertTransition,
   FoundryError,
@@ -256,7 +256,7 @@ export interface EventOpts {
 
 // ---------- Migrations ----------
 
-const MIGRATIONS: string[] = [
+export const MIGRATIONS: readonly string[] = [
   // 1: the spec's model, M1 cut
   `
   CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -372,6 +372,10 @@ const MIGRATIONS: string[] = [
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
+/** Marks a database as Foundry-on-Paseo's own. */
+export const STORE_APP = "foundry-paseo";
+/** Pre-upgrade copies kept beside the database. */
+export const BACKUPS_KEPT = 5;
 
 const json = (v: unknown) => JSON.stringify(v ?? null);
 
@@ -380,27 +384,91 @@ export class Store {
   /** Called after every event row is written, so the host can mirror it (timeline rows, badges, notifications). */
   onEvent?: (row: EventRow) => void;
 
-  constructor(path: string) {
+  constructor(private readonly path: string) {
     if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
     this.db = new DatabaseSync(path);
+    try {
+      this.refuseForeign();
+    } catch (e) {
+      this.db.close();
+      throw e;
+    }
     this.db.exec("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;");
     this.migrate();
   }
 
-  private migrate() {
-    this.db.exec("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
-    const row = this.db.prepare("SELECT value FROM meta WHERE key='schema_version'").get() as { value: string } | undefined;
-    let v = row ? Number(row.value) : 0;
+  /** Checks that change nothing: another program's database, or one newer than this plugin, is refused as it is. */
+  private refuseForeign() {
+    // Refuse a database another program made (an older Foundry, a prototype) instead of migrating over it.
+    const tables = (this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all() as { name: string }[]).map((t) => t.name);
+    if (tables.length) {
+      const has = (t: string) => tables.includes(t);
+      const metaVal = (k: string) => (has("meta") ? (this.db.prepare("SELECT value FROM meta WHERE key=?").get(k) as { value: string } | undefined)?.value : undefined);
+      const ours = metaVal("app") === STORE_APP || (metaVal("schema_version") !== undefined && has("feature_docs"));
+      if (!ours)
+        throw new FoundryError(
+          "STORE_FOREIGN",
+          `${this.path} was made by another program (tables: ${tables.slice(0, 6).join(", ")}${tables.length > 6 ? ", …" : ""}). ` +
+            "Foundry won't change it. Move it aside, or set FOUNDRY_HOME to another folder for Foundry's data.",
+        );
+    }
+    const v = this.schemaVersion();
+    if (!Number.isInteger(v) || v < 0) throw new FoundryError("STORE_INVALID", `${this.path} has an unreadable schema version. Foundry won't change it.`);
     if (v > MIGRATIONS.length)
-      throw new Error(`Foundry store is at schema ${v}, newer than this plugin (${MIGRATIONS.length}). Update the plugin.`);
+      throw new FoundryError("STORE_TOO_NEW", `${this.path} is at schema ${v}, newer than this plugin (${MIGRATIONS.length}). Update the plugin; Foundry won't change the database.`);
+  }
+
+  private schemaVersion(): number {
+    const hasMeta = !!this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'").get();
+    const row = hasMeta ? (this.db.prepare("SELECT value FROM meta WHERE key='schema_version'").get() as { value: string } | undefined) : undefined;
+    return row ? Number(row.value) : 0;
+  }
+
+  /**
+   * Bring the database to the current schema without ever losing data:
+   * - a database newer than this plugin is refused untouched (a downgrade never rewrites it);
+   * - before upgrading an existing database, a consistent copy is written beside it
+   *   (foundry.db.backup-v<from>-<time>), and the newest few copies are kept;
+   * - each migration runs in its own transaction with the version bump, so a failure leaves the
+   *   database at the last version that applied fully, and the next start retries from there.
+   * Migrations are append-only: never edit or reorder one that has shipped.
+   */
+  private migrate() {
+    let v = this.schemaVersion();
+    if (v > 0 && v < MIGRATIONS.length) this.backup(v);
+    this.db.exec("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
+    this.db.prepare("INSERT INTO meta(key,value) VALUES('app',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(STORE_APP);
     while (v < MIGRATIONS.length) {
-      this.tx(() => {
-        this.db.exec(MIGRATIONS[v]!);
-        v++;
-        this.db.prepare("INSERT INTO meta(key,value) VALUES('schema_version',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(String(v));
-      });
+      const from = v;
+      try {
+        this.tx(() => {
+          this.db.exec(MIGRATIONS[from]!);
+          this.db.prepare("INSERT INTO meta(key,value) VALUES('schema_version',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(String(from + 1));
+        });
+      } catch (e) {
+        throw new FoundryError("MIGRATION_FAILED", `Upgrading ${this.path} from schema ${from} to ${from + 1} failed and was rolled back; the database is unchanged at schema ${from}. ${String((e as Error)?.message ?? e)}`);
+      }
+      v = from + 1;
     }
   }
+
+  /** A consistent copy of the database before an upgrade; keeps the newest BACKUPS_KEPT. */
+  private backup(fromVersion: number) {
+    if (this.path === ":memory:") return;
+    const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\..*/, "");
+    const target = `${this.path}.backup-v${fromVersion}-${stamp}`;
+    if (!existsSync(target)) this.db.exec(`VACUUM INTO '${target.replace(/'/g, "''")}'`);
+    const dir = dirname(this.path);
+    const prefix = `${basename(this.path)}.backup-`;
+    const old = readdirSync(dir)
+      .filter((f) => f.startsWith(prefix))
+      .map((f) => ({ f, t: statSync(join(dir, f)).mtimeMs }))
+      .sort((a, b) => b.t - a.t)
+      .slice(BACKUPS_KEPT)
+      .map((x) => x.f);
+    for (const f of old) rmSync(join(dir, f), { force: true });
+  }
+
 
   // ---------- low level ----------
   run(sql: string, ...p: SQLInputValue[]) {

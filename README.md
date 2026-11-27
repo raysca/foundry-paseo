@@ -60,8 +60,12 @@ It installs the plugin's dependencies, type-checks, then installs Foundry into y
 (or reloads it if it's already there) and waits until Paseo reports it running. `PASEO_HOME` picks a
 daemon home other than `~/.paseo`. Paseo runs the plugin from this checkout, so keep it in place.
 
-Foundry appears in Paseo's sidebar: the features overview, a feature's docs and approvals, the review
+Foundry appears in Paseo's sidebar. Its first screen lists your Paseo projects as cards; tap one to use it with Foundry (the key, name and base branch come from the repo). Then: the features overview, a feature's docs and approvals, the review
 panel for each task, Verify and Ship, and the project manager's chat with its cards. Open Settings →
-Foundry first. The setup check lists anything missing (role profiles, a
+Foundry first.
+
+Foundry keeps its data in `~/.foundry-paseo/foundry.db` (`FOUNDRY_HOME` moves it). It refuses a database that another program made, such as the older Go Foundry's `~/.foundry`, rather than change it.
+
+The setup check lists anything missing (role profiles, a
 provider that leaves Paseo's orchestration tools on, MCP injection off, a daemon shell that isn't zsh)
 and how to fix it.

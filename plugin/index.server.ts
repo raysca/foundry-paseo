@@ -7,6 +7,7 @@ import type { PluginServerContext, PluginHandlerContext } from "@getpaseo/plugin
 import { Store } from "./server/core/store";
 import { Foundry } from "./server/core/foundry";
 import { featuresOverview } from "./server/core/overview";
+import { adoptRepo } from "./server/core/projects";
 import { FoundryError } from "./server/core/model";
 import { PaseoAdapter, type AdapterConfig } from "./server/adapter/paseo";
 import { buildTools } from "./server/adapter/tools";
@@ -17,7 +18,8 @@ type PaseoApi = PluginHandlerContext["paseo"];
 const PLUGIN_ID = "foundry";
 
 export default function contribute(server: PluginServerContext) {
-  const home = process.env.FOUNDRY_HOME ?? join(homedir(), ".foundry");
+  // Not ~/.foundry: the earlier Go Foundry and the prototype kept their own databases there.
+  const home = process.env.FOUNDRY_HOME ?? join(homedir(), ".foundry-paseo");
   const store = new Store(join(home, "foundry.db"));
 
   // Effective settings: Paseo plugin settings, then an optional overlay file (the e2e kit writes one).
@@ -105,8 +107,12 @@ export default function contribute(server: PluginServerContext) {
       switch (action) {
         case "project.create":
           return store.createProject({ key: String(args.key), name: String(args.name ?? args.key), repo: String(args.repo), baseRef: String(args.baseRef ?? "main") });
+        case "project.adopt":
+          return adoptRepo(store, { repo: String(args.repo ?? ""), name: args.name ? String(args.name) : undefined });
         case "setup.check":
           return foundry.runSetupCheck();
+        case "setup.create_profiles":
+          return foundry.createProfiles();
         case "issue.start":
           return foundry.startIssue(String(args.key));
         case "issue.accept":

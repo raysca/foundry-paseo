@@ -93,4 +93,10 @@ export interface Host {
   notify(n: { title: string; body: string; key: string; screen?: string }): Promise<void>;
 
   facts(): Promise<HostFacts>;
+  /**
+   * Onboarding: add Foundry's role profiles (and the tool-restricted provider they run on) to the host's
+   * agent settings, only the ones that are missing. Never changes or removes an existing entry.
+   * Returns what was added.
+   */
+  addMissingProfiles(o: { harness: string; workModel: string; pmModel: string }): Promise<string[]>;
 }

@@ -40,7 +40,7 @@ wait_for() {
 # orchestration tools disabled, and the four foundry-* role profiles.
 write_daemon_config() {
   mkdir -p "$PHOME"
-  python3 - "$PHOME/config.json" "$PORT" "$HARNESS" "$E2E/paseo-tools.json" <<'PY'
+  python3 - "$PHOME/config.json" "$PORT" "$HARNESS" "$ROOT/plugin/server/adapter/paseo-tools.json" <<'PY'
 import json, sys, os
 path, port, harness, tools_path = sys.argv[1:5]
 tools = json.load(open(tools_path))
