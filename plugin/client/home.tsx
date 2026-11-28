@@ -6,7 +6,7 @@ import { Loading, ScrollView, useToast } from "@getpaseo/plugin/client/ui";
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { View } from "react-native";
-import { Badge, Btn, Card, Choice, Empty, Field, go, LoopPick, Page, Progress, Row, SCREEN, Section, T, Themed, useAct, useColors, useFoundry, useLoops, type State } from "./kit";
+import { Badge, Btn, Card, Choice, Empty, Field, go, LoopPick, Page, Progress, Row, SCREEN, Section, STATUS_TONE, SupervisionBadges, T, Themed, useAct, useColors, useFoundry, useLoops, type State } from "./kit";
 import { actionRpc } from "../shared/rpc";
 import { PROFILE_ROLES } from "../shared/roles";
 
@@ -53,6 +53,7 @@ function Home({ projectKey }: { projectKey?: string }) {
       <WhatsNew ob={s.onboarding} />
       <Setup setup={s.setup} />
       <NewFeature projectKey={project.key} />
+      <QuickTasks s={s} project={project} />
       <Row wrap>
         <Choice value={bucket} onChange={setBucket} options={[{ value: "all", label: "All" }, ...BUCKETS.map(([b, name]) => ({ value: b, label: name }))]} />
         <Choice value={status} onChange={setStatus} options={[{ value: "active", label: "Active" }, { value: "paused", label: "Paused" }, { value: "cancelled", label: "Cancelled" }, { value: "all", label: "Any status" }]} />
@@ -533,5 +534,81 @@ function AutostartPaused({ paused }: { paused: { at: string; why: string } | nul
         <Btn label="Resume auto-start" kind="primary" disabled={act.pending} onPress={() => void act.run("autostart.resume", {})} />
       </Row>
     </Card>
+  );
+}
+
+/**
+ * Quick tasks (one task, no feature, shipped on its own) and discovered work (found by an agent outside
+ * its task, waiting in Backlog for you): create one, start or drop what's waiting, open any to review it.
+ */
+function QuickTasks({ s, project }: { s: any; project: any }) {
+  const act = useAct();
+  const [open, setOpen] = useState(false);
+  const [title, setTitle] = useState("");
+  const [description, setDescription] = useState("");
+  const [loop, setLoop] = useState<string | null>(null);
+  const mine = (s.issues as any[]).filter((i) => i.project_id === project.id && !i.feature_id);
+  const discovered = mine.filter((i) => i.origin === "discovered" && i.status === "Backlog");
+  const quick = mine.filter((i) => !(i.origin === "discovered" && i.status === "Backlog") && i.status !== "Cancelled").slice(-12).reverse();
+  return (
+    <Section title="Quick tasks" trailing={!open ? <Btn label="New quick task" onPress={() => setOpen(true)} /> : undefined}>
+      {open ? (
+        <Card>
+          <T muted size={13}>One task, no spec: it builds on its own branch from {project.base_ref}, you review it, and it ships on its own ({project.ship_mode === "pr" ? "as its own PR" : "merged into base"}).</T>
+          <Field value={title} onChange={setTitle} placeholder="Fix the typo in --help" />
+          <Field value={description} onChange={setDescription} placeholder="What to change, and how you'll know it's right (optional)" multiline />
+          <Row wrap>
+            <T muted size={13}>Loop:</T>
+            <LoopPick projectId={project.id} value={loop} onChange={setLoop} />
+          </Row>
+          <Row>
+            <Btn
+              label={act.pending ? "Starting" : "Create and start"}
+              kind="primary"
+              disabled={!title.trim() || act.pending}
+              onPress={async () => {
+                const r = await act.run("issue.create_quick", { project: project.key, title, description, loop });
+                if (r?.key) {
+                  setTitle("");
+                  setDescription("");
+                  setOpen(false);
+                }
+              }}
+            />
+            <Btn label="Cancel" onPress={() => setOpen(false)} />
+          </Row>
+        </Card>
+      ) : null}
+      {discovered.map((i) => (
+        <Card key={i.key}>
+          <Row wrap>
+            <Badge label="discovered" tone="warning" />
+            <T bold>{i.key}</T>
+            <T>{i.title}</T>
+            {i.found_in ? <T muted size={12}>found in {i.found_in}</T> : null}
+          </Row>
+          <T muted size={13}>{i.description.split("\n")[0]}</T>
+          <Row wrap>
+            <Btn label="Start it" kind="primary" disabled={act.pending} onPress={() => void act.run("issue.start", { key: i.key })} />
+            <Btn label="Open" onPress={() => go(SCREEN.issue, { key: i.key })} />
+            <Btn label="Drop it" kind="danger" disabled={act.pending} onPress={() => void act.run("issue.cancel", { key: i.key })} />
+          </Row>
+        </Card>
+      ))}
+      {quick.map((i) => (
+        <Card key={i.key} onPress={() => go(SCREEN.issue, { key: i.key })}>
+          <Row wrap>
+            <T bold>{i.key}</T>
+            <T>{i.title}</T>
+            <Badge label={i.status.replace("_", " ")} tone={STATUS_TONE[i.status]} />
+            {(s.ships ?? []).some((x: any) => x.key === `ship:issue:${i.key}`) ? <Badge label="PR open" tone="info" /> : null}
+            {i.status === "In_Review" ? <Badge label="review it" tone="info" /> : null}
+            <SupervisionBadges issue={i} attempt={(s.attempts as any[]).find((a) => a.issue_key === i.key)} />
+            {i.status === "Backlog" ? <Btn label="Start" disabled={act.pending} onPress={() => void act.run("issue.start", { key: i.key })} /> : null}
+          </Row>
+        </Card>
+      ))}
+      {!open && !discovered.length && !quick.length ? <T muted size={13}>No quick tasks yet.</T> : null}
+    </Section>
   );
 }

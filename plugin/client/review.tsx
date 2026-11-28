@@ -1,7 +1,7 @@
 // The review panel for one task: the diff against the feature head at the SHAs you accept, the check
 // and review runs, the agents' verdicts, questions waiting on you, then Accept or Rework.
 import type { PluginScreenProps } from "@getpaseo/plugin/client";
-import { useRpc } from "@getpaseo/plugin/client";
+import { openExternalUrl, useRpc } from "@getpaseo/plugin/client";
 import { Loading, ScrollView } from "@getpaseo/plugin/client/ui";
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
@@ -70,12 +70,15 @@ function Issue({ issueKey, openAgent }: { issueKey: string; openAgent?: (agentId
         ) : null}
       </Card>
       <Questions questions={(r?.questions ?? []).filter((x: any) => x.status === "live" || x.status === "waiting")} />
-      {i.status === "In_Review" && r ? <Decide issueKey={i.key} head={r.head_sha} tree={r.tree_sha} flagged={i.flag === "SPEC_CHANGED"} /> : null}
+      {i.status === "In_Review" && r ? (
+        <Decide issueKey={i.key} head={r.head_sha} tree={r.tree_sha} flagged={i.flag === "SPEC_CHANGED"} quick={!i.feature_id} ship={parseJson<any>((s.ships ?? []).find((x: any) => x.key === `ship:issue:${i.key}`)?.value, null)} />
+      ) : null}
+      {r ? <FollowUps issueKey={i.key} queued={r.followups ?? []} status={i.status} /> : null}
       {i.status === "Done" && i.flag === "SPEC_CHANGED" ? <T muted size={13}>Accepted as is after the spec changed: the requirements it covers stay not covered until another task covers them, and Verify reports them.</T> : null}
       {i.status === "Failed" || i.status === "Blocked" ? <Retry issueKey={i.key} projectKey={p.key} /> : null}
       {r ? <Verdicts events={r.events} /> : null}
       {r ? <Runs runs={r.runs} /> : null}
-      {i.status === "Done" ? <T muted>Merged into the feature branch.</T> : r ? <Diff stat={r.stat} diff={r.diff} /> : review.isLoading ? <Loading /> : null}
+      {i.status === "Done" ? <T muted>{i.feature_id ? "Merged into the feature branch." : "Shipped into base."}</T> : r ? <Diff stat={r.stat} diff={r.diff} /> : review.isLoading ? <Loading /> : null}
     </Page>
   );
 }
@@ -103,14 +106,22 @@ function Questions({ questions }: { questions: any[] }) {
   );
 }
 
-function Decide({ issueKey, head, tree, flagged }: { issueKey: string; head: string | null; tree: string | null; flagged: boolean }) {
+function Decide({ issueKey, head, tree, flagged, quick, ship }: { issueKey: string; head: string | null; tree: string | null; flagged: boolean; quick?: boolean; ship?: any }) {
   const act = useAct();
   const action = useRpc(actionRpc);
   const [feedback, setFeedback] = useState("");
+  const [confirm, setConfirm] = useState<string | null>(null);
+  const [refused, setRefused] = useState<string | null>(null);
   if (!head || !tree) return null;
   const draft = async () => {
     const r = (await action({ action: "issue.flag_draft", args: { key: issueKey } })) as any;
     if (r?.feedback) setFeedback(r.feedback);
+  };
+  const accept = async (yes = false) => {
+    const r = await act.attempt("issue.accept", { key: issueKey, head_sha: head, tree_sha: tree, feedback, confirm: yes });
+    if (r.error?.code === "BASE_CHECKED_OUT") return setConfirm(r.error.message);
+    setConfirm(null);
+    setRefused(r.error ? `${r.error.code}: ${r.error.message}` : null);
   };
   return (
     <Card>
@@ -124,13 +135,56 @@ function Decide({ issueKey, head, tree, flagged }: { issueKey: string; head: str
           </Row>
         </>
       ) : null}
-      <T muted size={13}>Accept merges this task into the feature branch at {short(head)}. If it moved since this page loaded, Foundry refuses and shows the new head.</T>
+      {ship?.pr ? (
+        <Row wrap>
+          <Badge label={`PR #${ship.pr.number} open`} tone="info" />
+          <T size={13}>Accepted at {short(ship.sha)}. Foundry moves it to Done when the PR merges.</T>
+          <Btn label="Open the PR" onPress={() => void openExternalUrl(ship.pr.url)} />
+          <Btn label="Check the PR now" disabled={act.pending} onPress={() => void act.run("issue.refresh_pr", { key: issueKey })} />
+        </Row>
+      ) : null}
+      <T muted size={13}>
+        {quick
+          ? `Accept ships this quick task at ${short(head)} on its own: a PR into base when the project ships by PR, else a merge into base.`
+          : `Accept merges this task into the feature branch at ${short(head)}.`}{" "}
+        If it moved since this page loaded, Foundry refuses and shows the new head.
+      </T>
+      {confirm ? (
+        <Row wrap>
+          <T size={13}>{confirm}</T>
+          <Btn label="Merge there" kind="primary" disabled={act.pending} onPress={() => void accept(true)} />
+        </Row>
+      ) : null}
+      {refused ? <T size={13}>{refused}</T> : null}
       <Field value={feedback} onChange={setFeedback} placeholder="Feedback (needed for rework, optional for accept)" multiline />
       <Row wrap>
-        <Btn label={flagged ? `Accept ${short(head)} as is` : `Accept ${short(head)}`} kind="primary" disabled={act.pending} onPress={() => void act.run("issue.accept", { key: issueKey, head_sha: head, tree_sha: tree, feedback })} />
+        <Btn label={flagged ? `Accept ${short(head)} as is` : `Accept ${short(head)}`} kind="primary" disabled={act.pending || ship?.sha === head} onPress={() => void accept()} />
         <Btn label="Send back for rework" disabled={!feedback.trim() || act.pending} onPress={async () => (await act.run("issue.rework", { key: issueKey, head_sha: head, tree_sha: tree, feedback })) && setFeedback("")} />
       </Row>
     </Card>
+  );
+}
+
+/** Messages for the task's builder. While it runs they wait for its next turn; you can take one back until then. */
+function FollowUps({ issueKey, queued, status }: { issueKey: string; queued: any[]; status: string }) {
+  const act = useAct();
+  const [text, setText] = useState("");
+  if (["Done", "Cancelled"].includes(status)) return null;
+  const running = ["In_Progress", "Awaiting_Human"].includes(status);
+  return (
+    <Section title="Message the builder">
+      {queued.map((q) => (
+        <Row key={q.id} wrap>
+          <Badge label="waiting for its next turn" tone="info" />
+          <T size={13}>{q.text}</T>
+          <Btn label="Take back" disabled={act.pending} onPress={() => void act.run("issue.followup_cancel", { id: q.id })} />
+        </Row>
+      ))}
+      <Field value={text} onChange={setText} placeholder={running ? "It's working: your message waits for its next turn" : "A follow-up starts a new turn in the same session"} multiline />
+      <Row>
+        <Btn label={running ? "Queue for its next turn" : "Send"} disabled={!text.trim() || act.pending} onPress={async () => (await act.run("issue.followup", { key: issueKey, text })) && setText("")} />
+      </Row>
+    </Section>
   );
 }
 

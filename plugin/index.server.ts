@@ -198,7 +198,7 @@ export default function contribute(server: PluginServerContext) {
         case "issue.start":
           return foundry.startIssue(String(args.key));
         case "issue.accept":
-          return foundry.accept(String(args.key), String(args.head_sha), String(args.tree_sha), "you", String(args.feedback ?? ""));
+          return foundry.accept(String(args.key), String(args.head_sha), String(args.tree_sha), "you", String(args.feedback ?? ""), { confirmCheckedOut: args.confirm === true });
         case "issue.rework":
           return foundry.tasks.rework(String(args.key), String(args.head_sha), String(args.tree_sha), String(args.feedback ?? ""));
         case "issue.flag_draft":
@@ -212,6 +212,27 @@ export default function contribute(server: PluginServerContext) {
           return foundry.tasks.review(String(args.key));
         case "issue.followup":
           return foundry.tasks.followUp(String(args.key), String(args.text ?? ""));
+        case "issue.followup_cancel":
+          return foundry.tasks.cancelFollowUp(Number(args.id));
+        case "issue.create_quick":
+          return foundry.quick.create({
+            projectId: Number(args.project_id ?? store.projectByKey(String(args.project))?.id),
+            title: String(args.title ?? ""),
+            description: args.description ? String(args.description) : "",
+            loop: args.loop ? String(args.loop) : null,
+            checks: args.checks && typeof args.checks === "object" ? args.checks : {},
+            start: args.start !== false,
+          });
+        case "issue.cancel": {
+          // A task that isn't running (Backlog, Ready, Failed, Blocked): discovered work you don't want, a quick task you dropped.
+          const i = store.issue(String(args.key));
+          if (!i) throw new FoundryError("NOT_FOUND", `No issue ${args.key}`);
+          if (!["Backlog", "Ready", "Failed", "Blocked"].includes(i.status)) throw new FoundryError("INVALID_TRANSITION", `${i.key} is ${i.status}; ask the project manager to cancel running work`, { current: i.status });
+          foundry.tasks.cancel(i.key, "you");
+          return { key: i.key, status: "Cancelled" };
+        }
+        case "issue.refresh_pr":
+          return { results: await foundry.quick.refreshPrs(String(args.key), "you") };
         case "feature.create":
           return foundry.planning.createFeature({
             projectId: Number(args.project_id ?? store.projectByKey(String(args.project))?.id),

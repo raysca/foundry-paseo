@@ -46,8 +46,10 @@ for (let k = 1; k < SCHEMA_VERSION; k++) {
       assert.deepEqual(sl.map((x) => [x.n, x.title, x.branch]), [[1, "Shout mode", "foundry/feature/shout-mode"]]);
       assert.equal(s.issue("SHT-1")!.slice_id, sl[0]!.id);
     }
-    // Schema 14: no task has automatic retries yet.
+    // Schema 14: no task has automatic retries yet. Schema 15: no follow-ups queued, not discovered work.
     assert.deepEqual([s.issue("SHT-1")!.retries, s.issue("SHT-1")!.retry_at], [0, null]);
+    assert.equal(s.issue("SHT-1")!.found_in, null);
+    assert.equal(s.get<{ n: number }>("SELECT COUNT(*) n FROM followups")!.n, 0);
     s.close();
     const b = backups(d);
     assert.equal(b.length, 1);
@@ -84,15 +86,15 @@ test("a failing migration rolls back: the version and data stay as they were, an
   const path = join(d, "foundry.db");
   const last = SCHEMA_VERSION - 1;
   atVersion(path, last);
-  // Something in the way of the last migration's second step: its first (issues.retries) must not stay.
+  // Something in the way of the last migration's second step: its first (the followups table) must not stay.
   const db = new DatabaseSync(path);
-  db.exec("ALTER TABLE issues ADD COLUMN retry_at TEXT");
+  db.exec("ALTER TABLE issues ADD COLUMN found_in TEXT");
   db.close();
   assert.throws(() => new Store(path), (e: any) => e.code === "MIGRATION_FAILED" && new RegExp(`unchanged at schema ${last}`).test(e.message));
   const after = new DatabaseSync(path);
   assert.equal((after.prepare("SELECT value FROM meta WHERE key='schema_version'").get() as any).value, String(last));
   assert.equal((after.prepare("SELECT COUNT(*) n FROM issues").get() as any).n, 1);
-  assert.ok(!(after.prepare("PRAGMA table_info(issues)").all() as any[]).some((c) => c.name === "retries"), "no part of the failed migration stayed");
+  assert.ok(!after.prepare("SELECT 1 FROM sqlite_master WHERE name='followups'").get(), "no part of the failed migration stayed");
   after.close();
   assert.equal(backups(d).length, 1);
 });

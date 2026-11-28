@@ -17,6 +17,9 @@ export const CHANGES: Change[] = [
       "Page checks: on the frontend loop Foundry starts your paseo.json service, runs your \"page-check\" script against it (it gets FOUNDRY_PAGE_URL, FOUNDRY_PAGES and FOUNDRY_SCREENSHOTS) and shows the screenshots it saves at review. Your script owns the browser. A project without a service or a page-check script skips the step; a failing page check goes back to the builder, then comes to you flagged PAGE_CHECK_FAILED.",
       "Supervision: a builder or reviewer turn that goes silent for 15 minutes, or runs for an hour, is interrupted (and stopped if it doesn't end). Time spent waiting on your answer or on a Paseo permission card doesn't count, and the board shows \"waiting on permission in Paseo\". A timeout, an infrastructure error or a failed turn is retried automatically, twice by default with a growing wait, then the task is Blocked. Change the limits in Foundry's settings.",
       "After repeated infrastructure failures Foundry pauses auto-start and says so on the project page; resume it there once Paseo is fixed. You can still start tasks yourself.",
+      "Quick tasks: one task with no spec, from the project page or the project manager. It builds on its own branch from base, you review it, and accepting ships it on its own: its own PR into base when the project ships by PR, else a merge into base.",
+      "Discovered work: when a builder or reviewer finds something outside its task, it lands in Backlog with where it was found. Start it or drop it from the project page; it never starts on its own.",
+      "Message a running task's builder from its review panel: the message waits for its next turn, and you can take it back until then. A task that finishes while messages wait goes straight back to its builder with them.",
     ],
   },
   {

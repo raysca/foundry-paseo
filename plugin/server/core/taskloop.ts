@@ -131,7 +131,7 @@ export class TaskLoop {
     };
   }
 
-  private async assertLoop(projectId: number, loop: string) {
+  async assertLoop(projectId: number, loop: string) {
     const p = this.store.project(projectId)!;
     resolveLoop(loop, null, await projectLoops(p.repo, p.base_ref));
   }
@@ -164,7 +164,7 @@ export class TaskLoop {
   private mayAutoStart(i: Issue) {
     if (i.flag === "LOOP_MISSING") return false;
     if (i.origin === "discovered") return false;
-    if (!i.feature_id) return false; // quick tasks auto-start only with the project switch (M3)
+    if (!i.feature_id) return false; // a quick task starts when you create or start it, never on its own
     const f = this.store.feature(i.feature_id)!;
     return sliceAllowsAutoStart(this.store, f, i);
   }
@@ -215,7 +215,7 @@ export class TaskLoop {
       return a;
     });
     const runId = this.store.startRun("agent", { attempt: a.id, agent: agentId });
-    const prompt = await this.builderPrompt(i, loop);
+    const prompt = this.withFollowUps(key, a.id, await this.builderPrompt(i, loop));
     // Held while the agent starts: a fast agent can end its turn before startAgent returns, and that
     // turn's end must see the worktree recorded.
     await this.locks.with(`attempt:${key}`, async () => {
@@ -267,6 +267,7 @@ export class TaskLoop {
       await steering(p.repo, p.base_ref),
       "Make the change with tests. Do not commit: Foundry commits after your turn and runs the project's checks itself.",
       "If you need a decision from the developer, call the ask_human tool. If you can't do the task, call report_verdict with decision fail or human and say why.",
+      "If you find work outside this task (a bug nearby, missing tests), call report_discovered_work instead of doing it.",
       "End your turn with a short summary of what you changed.",
     ]
       .filter(Boolean)
@@ -371,7 +372,7 @@ export class TaskLoop {
       this.store.updateAttempt(a.id, { step: "build" });
       const run = this.store.startRun("agent", { attempt: a.id, agent: a.builder_agent_id, sha: a.head_sha });
       void run;
-      await this.host.send(a.builder_agent_id!, step.prompt ?? `Continue with step "${step.name}".`);
+      await this.sendBuilder(a, step.prompt ?? `Continue with step "${step.name}".`);
       return;
     }
   }
@@ -475,7 +476,7 @@ export class TaskLoop {
     this.store.event("fix_round", { issue: i.key, attempt: a.id, detail: { round, checks: o.names, missing } });
     this.store.startRun("fix", { attempt: a.id, agent: a.builder_agent_id, sha, detail: { round } });
     const msg = [`Foundry's ${o.what} failed on commit ${sha.slice(0, 10)} (fix round ${round} of ${budget}). Fix only these, then end your turn. Do not commit.`, ...o.lines].join("\n\n");
-    await this.host.send(a.builder_agent_id!, msg);
+    await this.sendBuilder(a, msg);
     return "fixing";
   }
 
@@ -643,6 +644,7 @@ export class TaskLoop {
       shotLines.length ? `Screenshots from the page check (open them to see the pages as a user would):\n${shotLines.join("\n")}` : "",
       `Diff:\n\`\`\`diff\n${diff.slice(0, 40_000)}\n\`\`\``,
       step.prompt ?? "",
+      "Work you notice outside this task goes to report_discovered_work, not into your findings.",
       "Call report_verdict exactly once: pass, rework (with findings the builder must fix), fail, or human (with action_required). Do not edit files: anything you change is reset.",
     ]
       .filter(Boolean)
@@ -709,8 +711,8 @@ export class TaskLoop {
     this.store.updateAttempt(a.id, { reworks: a.reworks + 1, step: "build", step_index: back });
     this.store.startRun("agent", { attempt: a.id, agent: a.builder_agent_id, sha: a.head_sha, detail: { rework: a.reworks + 1 } });
     const findings = (v.findings ?? []).map((f) => `- [${f.severity}] ${f.title}${f.evidence ? `: ${f.evidence}` : ""}`).join("\n");
-    await this.host.send(
-      a.builder_agent_id!,
+    await this.sendBuilder(
+      a,
       `Foundry's reviewer asks for changes at ${a.head_sha?.slice(0, 10)}:\n${v.reason}${findings ? `\n\nFindings:\n${findings}` : ""}\n\nFix these, then end your turn. Do not commit.`,
     );
   }
@@ -747,6 +749,17 @@ export class TaskLoop {
     });
     for (const [run, w] of this.watched) if (w.attemptId === a.id) this.watched.delete(run);
     if (o.reason === "INFRA_ERROR") this.tripBreaker();
+    // Follow-ups you queued while it ran: its builder takes them in a new turn instead of stopping for review.
+    if (issueStatus === "In_Review" && this.queuedFollowUps(a.issue_key).length) {
+      void Promise.resolve().then(() =>
+        this.locks
+          .with(`attempt:${a.issue_key}`, async () => {
+            if (this.store.issue(a.issue_key)!.status === "In_Review" && this.queuedFollowUps(a.issue_key).length) await this.continueInSession(a.issue_key, "Continue the task with the developer's messages below, then end your turn. Do not commit.", "you", "follow_up");
+          })
+          .catch((e) => this.store.event("followup_error", { issue: a.issue_key, detail: { error: String(e) } })),
+      );
+      return;
+    }
     if (issueStatus === "In_Review")
       void this.host.notify({ title: `${a.issue_key} is ready for your review`, body: o.flag ? `Flagged ${o.flag}. ${o.detail ?? ""}` : "Checks and review passed.", key: `review:${a.issue_key}`, screen: "board" });
     if (issueStatus === "Blocked" && retryable)
@@ -988,7 +1001,9 @@ export class TaskLoop {
       const p = this.store.project(i.project_id)!;
       const f = i.feature_id ? target(this.store, i.feature_id, sliceOfIssue(this.store, i)?.id ?? null).view : null;
       const cwd = a.worktree_path && existsSync(a.worktree_path) ? a.worktree_path : p.repo;
-      const base = f?.head_sha ? await git(cwd, "merge-base", f.head_sha, a.head_sha).catch(() => "") : "";
+      // A quick task's change is against base.
+      const against = f ? f.head_sha : p.base_ref;
+      const base = against ? await git(cwd, "merge-base", against, a.head_sha).catch(() => "") : "";
       if (base) {
         diff = await git(cwd, "diff", "--no-color", base, a.head_sha).catch(() => "");
         stat = await git(cwd, "diff", "--stat", "--no-color", base, a.head_sha).catch(() => "");
@@ -1006,10 +1021,11 @@ export class TaskLoop {
       runs: runs.map((r) => ({ ...r, detail: parse(r.detail, {}) })),
       events: events.map((e) => ({ ...e, detail: parse(e.detail, {}) })),
       questions,
+      followups: this.queuedFollowUps(key),
     };
   }
 
-  private async assertReviewable(key: string, headSha: string, treeSha: string) {
+  async assertReviewable(key: string, headSha: string, treeSha: string) {
     const i = this.store.issue(key);
     if (!i) throw new FoundryError("NOT_FOUND", `No issue ${key}`);
     if (i.status !== "In_Review") throw new FoundryError("NOT_IN_REVIEW", `${key} is ${i.status}, not In_Review`);
@@ -1146,7 +1162,51 @@ export class TaskLoop {
   /** A message to the issue's agent: a follow-up, an answer or a rework. Starts a new attempt in the same session. */
   async followUp(key: string, text: string, actor: Actor = "you") {
     if (!text.trim()) throw new FoundryError("MESSAGE_EMPTY", "A follow-up needs text");
+    const i = this.store.issue(key);
+    if (!i) throw new FoundryError("NOT_FOUND", `No issue ${key}`);
+    if (["Done", "Cancelled"].includes(i.status)) throw new FoundryError("INVALID_TRANSITION", `${key} is ${i.status}`, { current: i.status });
+    // While the task runs (or hasn't started), the message waits for its builder's next turn.
+    const running = this.store.activeAttempts().some((x) => x.issue_key === key);
+    const prev = this.store.latestAttempt(key);
+    if (running || !prev?.builder_agent_id) {
+      const r = this.store.run("INSERT INTO followups(issue_key,text,actor) VALUES(?,?,?)", key, text.trim(), actor);
+      const id = Number(r.lastInsertRowid);
+      this.store.event("followup_queued", { actor, issue: key, detail: { id } });
+      return { queued: id };
+    }
     return this.continueInSession(key, text, actor, "follow_up");
+  }
+
+  /** Foundry's own message to an idle task's builder (a merge conflict at accept): a new attempt in the same session. */
+  followUpSystem(key: string, text: string) {
+    return this.continueInSession(key, text, "system", "conflict");
+  }
+
+  /** Follow-ups waiting for the task's next builder turn. */
+  queuedFollowUps(key: string) {
+    return this.store.all<{ id: number; text: string; actor: string; created_at: string }>("SELECT id,text,actor,created_at FROM followups WHERE issue_key=? AND status='queued' ORDER BY id", key);
+  }
+
+  cancelFollowUp(id: number, actor: Actor = "you") {
+    const f = this.store.get<{ issue_key: string; status: string }>("SELECT issue_key,status FROM followups WHERE id=?", id);
+    if (!f) throw new FoundryError("NOT_FOUND", `No follow-up ${id}`);
+    if (f.status !== "queued") throw new FoundryError("FOLLOWUP_SENT", `That follow-up was already ${f.status}`);
+    this.store.run("UPDATE followups SET status='cancelled' WHERE id=?", id);
+    this.store.event("followup_cancelled", { actor, issue: f.issue_key, detail: { id } });
+    return { cancelled: id };
+  }
+
+  /** Put the queued follow-ups in front of a message to the builder, and mark them sent with this attempt. */
+  private withFollowUps(key: string, attemptId: number, message: string) {
+    const q = this.queuedFollowUps(key);
+    if (!q.length) return message;
+    this.store.run(`UPDATE followups SET status='sent', attempt_id=?, sent_at=datetime('now') WHERE id IN (${q.map(() => "?").join(",")})`, attemptId, ...q.map((x) => x.id));
+    this.store.event("followup_sent", { issue: key, attempt: attemptId, detail: { ids: q.map((x) => x.id) } });
+    return `${message}\n\nThe developer also left ${q.length === 1 ? "a message" : "messages"} for you while you worked:\n${q.map((x) => `- ${x.text}`).join("\n")}`;
+  }
+
+  private async sendBuilder(a: Attempt, message: string) {
+    await this.host.send(a.builder_agent_id!, this.withFollowUps(a.issue_key, a.id, message));
   }
 
   private async continueInSession(key: string, message: string, actor: Actor, why: "answer" | "rework" | "follow_up" | "conflict") {
@@ -1179,7 +1239,7 @@ export class TaskLoop {
     });
     this.store.startRun("agent", { attempt: a.id, agent: prev.builder_agent_id, sha: prev.head_sha, detail: { why } });
     this.store.event(why, { actor, issue: key, attempt: a.id });
-    await this.host.send(prev.builder_agent_id, message);
+    await this.sendBuilder(this.store.attempt(a.id)!, message);
     return this.store.attempt(a.id)!;
   }
 
