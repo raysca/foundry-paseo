@@ -39,6 +39,7 @@ function Feature({ id }: { id: number }) {
       <Docs s={s} f={f} />
       <Requirements s={s} f={f} />
       <Proposal s={s} f={f} />
+      <MergeOrder s={s} f={f} />
       <Tasks s={s} f={f} />
       <Delivery s={s} f={f} />
     </Page>
@@ -533,6 +534,61 @@ function Tasks({ s, f }: { s: State; f: any }) {
       ))}
         </View>
       ))}
+    </Section>
+  );
+}
+
+/**
+ * The merge order: every slice of the feature in the order it merges, where it stands, its Verify and
+ * its PR. The front's Ship actions are in Verify and Ship below; a slice behind it has its own here.
+ */
+function MergeOrder({ s, f }: { s: State; f: any }) {
+  const act = useAct();
+  const slices = (s.slices ?? []).filter((x: any) => x.feature_id === f.id);
+  if (slices.length < 2) return null;
+  const front = slices.find((x: any) => x.status !== "shipped" && x.status !== "cancelled");
+  const issues = s.issues.filter((i) => i.feature_id === f.id);
+  return (
+    <Section title="Merge order">
+      <T muted size={12}>Each slice ships as its own PR, in this order. The next slice builds on top of the front while the front is in Ship.</T>
+      {slices.map((sl: any, idx: number) => {
+        const isFront = sl.id === front?.id;
+        const key = isFront ? `ship:${f.id}` : `ship:slice:${sl.id}`;
+        const ship = parseJson<any>(s.ships.find((x) => x.key === key)?.value, null);
+        const v = s.verifications.find((x) => x.feature_id === f.id && x.slice_id === sl.id);
+        const hold = s.holds?.find((x) => x.key === `slice_hold:${sl.id}`)?.value;
+        const list = issues.filter((i) => (i.slice_id ?? front?.id) === sl.id);
+        const before = slices[idx - 1];
+        const active = ["building", "verify", "ship"].includes(sl.status);
+        const args = { id: f.id, slice: sl.id };
+        return (
+          <Card key={sl.id}>
+            <Row wrap>
+              <T bold>{sl.n}.</T>
+              <T bold>{sl.title}</T>
+              <Badge label={SLICE_STATUS[sl.status] ?? sl.status} tone={sl.status === "shipped" ? "success" : sl.status === "planned" ? "muted" : "info"} />
+              {isFront ? <Badge label="front" tone="info" /> : null}
+              {hold ? <Badge label={hold === "MERGE_CONFLICT" ? "held: conflicts with the slice before" : `held: ${hold}`} tone="warning" /> : null}
+              {v ? <Badge label={v.status === "running" ? "Verify running" : v.status === "passed" ? "verified" : `Verify: ${v.failure}`} tone={v.status === "passed" ? "success" : v.status === "failed" ? "warning" : "info"} /> : null}
+              {ship?.pr ? <Btn label={`PR #${ship.pr.number}`} onPress={() => void openExternalUrl(ship.pr.url)} /> : ship ? <Badge label={`local merge prepared at ${short(ship.sha)}`} tone="muted" /> : null}
+            </Row>
+            <T muted size={12}>
+              {list.filter((i) => i.status === "Done").length} of {list.length} tasks done
+              {sl.branch ? ` · on ${sl.branch}` : ""}
+              {sl.status === "shipped" ? ` · shipped${sl.shipped_sha ? ` at ${short(sl.shipped_sha)}` : ""}` : !before || before.status === "shipped" ? " · merges next" : ` · merges after slice ${before.n}${ship?.pr ? ` (its PR targets slice ${before.n}'s branch until then)` : ""}`}
+              {sl.status === "planned" ? ` · starts when slice ${sl.n - 1} reaches Ship` : ""}
+            </T>
+            {active && !isFront && !f.spec_change_open ? (
+              <Row wrap>
+                {sl.status === "verify" && v?.status === "failed" ? <Btn label="Ship with the gaps" onPress={() => void act.run("feature.ship_with_gaps", args)} /> : null}
+                {(sl.status === "verify" || (sl.status === "ship" && !ship?.pr)) && v?.status !== "running" ? <Btn label="Run Verify again" onPress={() => void act.run("feature.verify", { ...args, force: true })} /> : null}
+                {sl.status === "ship" && !ship ? <Btn label="Prepare its ship" kind="primary" disabled={act.pending} onPress={() => void act.run("feature.prepare_ship", args)} /> : null}
+                {sl.status === "ship" && ship ? <T muted size={12}>Ships once slice {front?.n} has merged.</T> : null}
+              </Row>
+            ) : null}
+          </Card>
+        );
+      })}
     </Section>
   );
 }

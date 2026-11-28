@@ -229,10 +229,12 @@ async function plan(s: Session, dir: string, text: string): Promise<string> {
   if (text.includes("approved a changed spec")) {
     const keys = [...text.matchAll(/^- (\S+-\d+) \[(\w+)\]/gm)].map((m) => m[1]!);
     const last = keys[keys.length - 1]!;
+    // With slices, the new task joins the last open slice (FAKE_SLICES, the slices e2e test).
+    const open = [...text.matchAll(/^- slice (\d+) "[^"]*" \((\w+)\)/gm)].filter((m) => !["shipped", "cancelled"].includes(m[2]!)).map((m) => Number(m[1]));
     const r = await call(s, "propose_tasks", {
       tasks: [
         ...keys.map((issue) => ({ issue, tag: "keep" })),
-        { ref: "N1", tag: "new", title: "Add --loud alias to the CLI with a test", requirement_refs: ["R3"], depends_on: [{ ref: last, reason: "extends its flag handling" }], touches: ["shout/cli.py"], size: "S" },
+        { ref: "N1", tag: "new", title: "Add --loud alias to the CLI with a test", requirement_refs: ["R3"], depends_on: [{ ref: last, reason: "extends its flag handling" }], touches: ["shout/cli.py"], size: "S", ...(open.length ? { slice: open[open.length - 1] } : {}) },
       ],
     });
     return `Proposed the change set. ${r}`;
@@ -248,7 +250,7 @@ async function plan(s: Session, dir: string, text: string): Promise<string> {
   if (text.includes("call propose_tasks")) {
     const r = await call(s, "propose_tasks", {
       tasks: [
-        { ref: "T1", title: "Add shout() to shout/core.py with tests", requirement_refs: ["R1"], touches: ["shout/core.py"], size: "S", checks: { scripts: ["unittest"] } },
+        { ref: "T1", title: "Add shout() to shout/core.py with tests", requirement_refs: ["R1"], touches: ["shout/core.py"], size: "S", checks: { scripts: ["unittest"] }, ...(SLICED ? { slice: 1 } : {}) },
         {
           ref: "T2",
           title: "Add --shout flag to the CLI with a test",
@@ -256,8 +258,12 @@ async function plan(s: Session, dir: string, text: string): Promise<string> {
           depends_on: [{ ref: "T1", reason: "the flag calls shout()" }],
           touches: ["shout/cli.py"],
           size: "S",
+          ...(SLICED ? { slice: 2 } : {}),
         },
+        // FAKE_SLICES: a third slice documents the CLI (the slices e2e test).
+        ...(SLICED ? [{ ref: "T3", title: "Document the CLI", requirement_refs: ["R2"], depends_on: [{ ref: "T2", reason: "documents the flag" }], touches: ["docs/loud.md"], size: "S", slice: 3 }] : []),
       ],
+      ...(SLICED ? { slices: [{ n: 1, title: "Shout core", goal: "shout() works" }, { n: 2, title: "CLI flag" }, { n: 3, title: "Docs" }] } : {}),
     });
     return `Proposed the task graph. ${r}`;
   }
@@ -288,6 +294,7 @@ const SHOUT_REQS = [
 const LOUD_REQ = { ref: "R3", title: "Loud alias", acceptance_criteria: ["WHERE --loud is given THE CLI SHALL behave as with --shout"] };
 
 const failedOnce = new Set<string>();
+const SLICED = process.env.FAKE_SLICES === "1";
 
 function implementLoud(cwd: string) {
   const p = join(cwd, "shout/cli.py");

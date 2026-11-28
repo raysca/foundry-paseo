@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { ensureIntegration, featureDir, reopenOnBase, steering, uniqueSlug, type Reopened } from "./features";
+import { activeSlices, setTargetStage, target } from "./slices";
 import { firstRemote } from "./github";
 import { changedPaths, commitAll, FOUNDRY_IDENT, git, head, HOST_IDENT, PM_IDENT, sh } from "./git";
 import { diffRequirements, lintRequirements, renumbered, validateChangeSet, type RequirementDiff, renderRequirements, withRequirements, renderTasks, validateTasks, validateSlices, type GraphResult, type ProposedRequirement, type ProposedSlice, type ProposedTask, type SliceResult } from "./graph";
@@ -1027,6 +1028,10 @@ export class Planning {
   /** The slice a task added after approval joins: the one it names if that hasn't shipped, else the last open slice. */
   private sliceFor(featureId: number, n?: number) {
     const named = n ? this.store.slices(featureId).find((x) => x.n === n && !["shipped", "cancelled"].includes(x.status)) : undefined;
+    const lastN = this.store.slices(featureId).at(-1)?.n ?? 0;
+    // The next number names a new slice at the end; it starts in its turn, like any planned slice.
+    if (!named && n === lastN + 1 && this.store.openSlice(featureId))
+      return this.store.addSlice(featureId, { n, title: `${this.store.feature(featureId)!.title}, slice ${n}`, status: "planned" }).id;
     const open = named ?? this.store.openSlice(featureId);
     if (open) return open.id;
     // Every slice has shipped (a reopened Done feature): the new work is a new slice at the end, on the feature's new branch.
@@ -1075,9 +1080,20 @@ export class Planning {
       return diff;
     });
     const f = this.store.feature(featureId)!;
+    const slices = this.store.slices(featureId);
+    const sliceN = new Map(slices.map((x) => [x.id, x.n]));
+    const front = slices.find((x) => x.status !== "shipped" && x.status !== "cancelled");
     const tasks = this.store
       .issues({ featureId })
-      .map((i) => `- ${i.key} [${i.status}] ${i.title} (covers ${parse<string[]>(i.requirement_refs, []).join(", ") || "nothing"})`);
+      .map((i) => `- ${i.key} [${i.status}] ${i.title} (${slices.length ? `slice ${sliceN.get(i.slice_id ?? front?.id ?? -1) ?? 1}; ` : ""}covers ${parse<string[]>(i.requirement_refs, []).join(", ") || "nothing"})`);
+    const sliceLines = slices.length
+      ? [
+          "",
+          "Slices, in merge order:",
+          ...slices.map((x) => `- slice ${x.n} "${x.title}" (${x.status})`),
+          "Give every new task a slice: the open slice (not shipped or cancelled) its work belongs with, or the next number after the last slice for a new slice at the end. A task may depend only on tasks in its own or an earlier slice. Never put a task in a shipped slice: a follow-up to shipped work goes in an open slice. Tasks you keep, update or flag stay in their slice.",
+        ]
+      : [];
     const msg = [
       "The developer approved a changed spec. Requirement diff against the last approved spec:",
       `- unchanged: ${diff.unchanged.join(", ") || "none"}`,
@@ -1087,6 +1103,7 @@ export class Planning {
       "",
       "Every task of the feature:",
       ...tasks,
+      ...sliceLines,
       "",
       "Call propose_tasks once with one change set. List every task above that isn't Cancelled with its issue key and a tag:",
       "keep (covers only unchanged requirements, or is Done); update (not started and covers a changed requirement: give the new description, requirement_refs and checks); flag (running or in review and covers a changed or removed requirement); cancel (not started and covers only removed requirements).",
@@ -1103,10 +1120,38 @@ export class Planning {
     const diff = parse<RequirementDiff>(change.diff, { unchanged: [], changed: [], added: [], removed: [] });
     const existing = this.store.issues({ featureId: f.id }).map((i) => ({ key: i.key, status: i.status, requirement_refs: parse<string[]>(i.requirement_refs, []), touches: parse<string[]>(i.touches, []) }));
     const others = this.unfinishedIssues(f).filter((o) => !existing.some((e) => e.key === o.key));
+    this.checkChangeSlices(f, tasks);
     const result = validateChangeSet(tasks, diff, existing, others);
     const prop = this.store.addProposal(f.id, tasks, result, "change");
     this.store.event("change_set_proposed", { actor: "pm", project: f.project_id, feature: f.id, detail: { proposal: prop.id, entries: tasks.length } });
     return { recorded: true, proposal: prop.id, waves: result.waves, warnings: result.warnings };
+  }
+
+  /**
+   * New tasks of a change set name their slice: an open one, or the next number for a new slice at the
+   * end. A shipped slice is refused (SLICE_SHIPPED), and so is a dependency on a task in a later slice.
+   */
+  private checkChangeSlices(f: Feature, tasks: ProposedTask[]) {
+    const slices = this.store.slices(f.id);
+    if (!slices.length) return;
+    const last = slices.at(-1)!.n;
+    const front = slices.find((x) => x.status !== "shipped" && x.status !== "cancelled");
+    const nOf = (sliceId: number | null) => slices.find((x) => x.id === (sliceId ?? front?.id))?.n ?? 1;
+    const fresh = tasks.filter((t) => !t.issue);
+    const target = (t: ProposedTask) => t.slice ?? (this.store.openSlice(f.id)?.n ?? last + 1);
+    const shipped = fresh.filter((t) => t.slice && ["shipped", "cancelled"].includes(slices.find((x) => x.n === t.slice)?.status ?? ""));
+    if (shipped.length)
+      throw new FoundryError("SLICE_SHIPPED", `The change set was not recorded: ${shipped.map((t) => `${t.ref} names slice ${t.slice}, which has ${slices.find((x) => x.n === t.slice)!.status}`).join("; ")}. Put the work in an open slice or slice ${last + 1}, then resend.`, { refs: shipped.map((t) => t.ref) });
+    const errors: string[] = [];
+    for (const t of fresh) {
+      if (t.slice && (t.slice < 1 || t.slice > last + 1)) errors.push(`${t.ref} names slice ${t.slice}; slices are 1 to ${last}, or ${last + 1} for a new one.`);
+      for (const d of t.depends_on ?? []) {
+        const dep = this.store.issue(d.ref);
+        const other = dep ? nOf(dep.slice_id) : fresh.find((x) => x.ref === d.ref) ? target(fresh.find((x) => x.ref === d.ref)!) : null;
+        if (other !== null && other > target(t)) errors.push(`${t.ref} (slice ${target(t)}) depends on ${d.ref} in a later slice (${other}).`);
+      }
+    }
+    if (errors.length) throw new FoundryError("SLICE_INVALID", `The change set was not recorded. Fix and resend:\n- ${errors.join("\n- ")}`, { errors });
   }
 
   /** Apply a change set in one step, all or nothing; auto-start resumes. */
@@ -1179,6 +1224,13 @@ export class Planning {
         if (f.stage !== "build") {
           this.store.setSetting(`ship:${f.id}`, "");
           this.store.setStage(f.id, "build", actor);
+        }
+        // The same for a slice building behind the front: it is checked again against the new requirements.
+        for (const sl of activeSlices(this.store, f.id).slice(1))
+          if (sl.status !== "building") setTargetStage(this.store, target(this.store, f.id, sl.id), "build", actor);
+        for (const sl of activeSlices(this.store, f.id).slice(1)) {
+          const prepared = parse<{ pr?: unknown } | null>(this.store.setting(`ship:slice:${sl.id}`), null);
+          if (prepared && !prepared.pr) this.store.setSetting(`ship:slice:${sl.id}`, "");
         }
         return { applied, retire: diff.reopened?.workspace_id ?? null };
       });

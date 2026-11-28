@@ -49,6 +49,8 @@ bash e2e/loop1.sh                 # loop 1: idea to approved task list, its task
 bash e2e/quick.sh                 # Quick flow: spec, plan and task list in one turn, approved once
 bash e2e/ship-pr.sh               # M2 exit test: Ship by GitHub PR with a fake gh, then reopen the Done feature by
                                   # editing its spec, turn a failed Verify requirement into a task, merge a second PR
+bash e2e/slices.sh                # slices exit test: three slices as stacked PRs, promoted and retargeted in order,
+                                  # a spec change landing in the building slice
 bash e2e/exit.sh                  # M1 exit test: loop 1 with a spec edit during Build, through Verify and Ship
 bash e2e/ui.sh                    # the same scenario clicked through Foundry's screens in Paseo's web app (needs Playwright)
 ```

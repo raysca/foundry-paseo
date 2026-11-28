@@ -388,7 +388,9 @@ export function renderTasks(title: string, tasks: ProposedTask[], g: GraphResult
     const t = byRef.get(r)!;
     const dep = (t.depends_on ?? []).map((d) => `${d.ref}${d.reason ? ` (${d.reason})` : ""}`).join("; ");
     const checks = [...(t.checks?.scripts ?? []), ...(t.checks?.paths ?? []).map((p) => `path ${p}`)].join(", ");
-    return `| ${r} | ${esc(t.title)} | ${(t.requirement_refs ?? []).join(", ")} | ${esc(dep)} | ${t.size ?? ""} | ${esc(checks)} |`;
+    // A change set's new task says which slice it joins.
+    const where = existing.length && t.slice ? ` (slice ${t.slice})` : "";
+    return `| ${r} | ${esc(t.title)}${where} | ${(t.requirement_refs ?? []).join(", ")} | ${esc(dep)} | ${t.size ?? ""} | ${esc(checks)} |`;
   };
   const head = ["| Ref | Task | Covers | Depends on | Size | Checks |", "|---|---|---|---|---|---|"];
   if (slices.length > 1)
