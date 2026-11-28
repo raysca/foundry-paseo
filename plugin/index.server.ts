@@ -210,7 +210,7 @@ export default function contribute(server: PluginServerContext) {
         case "feature.approve_plan":
           return foundry.planning.approvePlan(Number(args.id), String(args.sha));
         case "feature.approve_tasks":
-          return foundry.planning.approveTasks(Number(args.id), Number(args.proposal), String(args.sha));
+          return foundry.planning.approveTasks(Number(args.id), Number(args.proposal), String(args.sha), "you", { spec: args.spec_sha, plan: args.plan_sha });
         case "feature.cut_task":
           return foundry.planning.cutTask(Number(args.id), String(args.ref), args.cut !== false);
         case "feature.revise":

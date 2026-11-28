@@ -31,7 +31,8 @@ const END_TURN =
   "The developer hasn't answered yet. End your turn now without writing the spec; the answers will arrive as your next message.";
 
 /** What a planning turn is for: a stage's step, or one of the two turns of a spec change. */
-type TurnKind = FeatureStage | "spec_change" | "change_set";
+/** "quick" is a Quick-flow turn: spec, plan and the task proposal together. */
+type TurnKind = FeatureStage | "spec_change" | "change_set" | "quick";
 
 interface Turn {
   agentId: string;
@@ -63,11 +64,11 @@ export class Planning {
     if (!p) throw new FoundryError("NOT_FOUND", `No project ${o.projectId}`);
     const idea = o.idea?.trim() ?? "";
     if (!idea) throw new FoundryError("IDEA_REQUIRED", "Describe the feature in a few sentences.");
-    if (o.flow === "quick") throw new FoundryError("NOT_SUPPORTED_YET", "The Quick flow arrives in M2.");
+    if (o.flow && !["standard", "quick"].includes(o.flow)) throw new FoundryError("INVALID_FLOW", "Flow is standard or quick.");
     if (o.grill && !(o.grill in GRILL_ROUNDS)) throw new FoundryError("INVALID_GRILL", "Grill level is none, light or normal.");
     const title = (o.title?.trim() || idea.split("\n")[0]!).slice(0, 80);
     const slug = await uniqueSlug(this.store, p.id, p.repo, title);
-    const f0 = this.store.createFeature({ projectId: p.id, slug, title, idea, flow: "standard", branch: "" });
+    const f0 = this.store.createFeature({ projectId: p.id, slug, title, idea, flow: o.flow ?? "standard", branch: "" });
     if (o.grill) this.store.updateFeature(f0.id, { grill: o.grill });
     let f: Feature;
     try {
@@ -85,13 +86,30 @@ export class Planning {
       throw new FoundryError("CREATE_FAILED", `Could not create the feature: ${String(e instanceof Error ? e.message : e)}`);
     }
     this.store.event("feature_ready", { actor, project: p.id, feature: f.id, detail: { slug, branch: f.branch } });
-    await this.runTurn(f.id, "clarify", this.clarifySteps(f)).catch((e) => this.failTurn(f.id, String(e instanceof Error ? e.message : e)));
+    await this.runTurn(f.id, this.quick(f) ? "quick" : "clarify", this.clarifySteps(f)).catch((e) => this.failTurn(f.id, String(e instanceof Error ? e.message : e)));
     return this.store.feature(f.id)!;
   }
 
   // ---------- turns ----------
   private rounds(f: Feature) {
-    return GRILL_ROUNDS[f.grill ?? "light"] ?? 1;
+    const n = GRILL_ROUNDS[f.grill ?? "light"] ?? 1;
+    return this.quick(f) ? Math.min(n, 1) : n; // a Quick-flow feature gets at most one round
+  }
+
+  private quick(f: Feature) {
+    return f.flow === "quick";
+  }
+
+  /** What follows Clarify: the spec steps, or in the Quick flow spec, plan and tasks in the same turn. */
+  private afterClarify(f: Feature) {
+    const dir = featureDir(f.slug);
+    if (!this.quick(f)) return this.specSteps(dir);
+    return [
+      this.specSteps(dir, false),
+      `Step 3, Plan: write ${dir}/plan.md with ## Approach, ## Files and components, ## Data and API changes, ## Risks and ## Test strategy.`,
+      `Step 4, Tasks: ${this.taskRules()} End your turn.`,
+      "This is the Quick flow: the developer approves all three at once, at the task list.",
+    ].join("\n\n");
   }
 
   private preamble(f: Feature) {
@@ -110,15 +128,15 @@ export class Planning {
       left > 0
         ? `Step 1, Clarify: if anything important is unclear, call ask_questions once with at most ${MAX_QUESTIONS} questions, each with an id, the question and your recommended answer. If the reply tells you to end your turn, do that; the answers arrive as your next message. Decide anything else with sensible defaults and list them under Decisions.`
         : "Step 1: do not ask questions. Decide with sensible defaults and list them under Decisions.",
-      this.specSteps(dir),
+      this.afterClarify(f),
     ].join("\n\n");
   }
 
-  private specSteps(dir: string) {
+  private specSteps(dir: string, end = true) {
     return [
       `Step 2, Spec: write ${dir}/spec.md with ## Goal, ## User stories, ## Requirements, ## Out of scope and ## Decisions (include the developer's answers).`,
       "Call propose_requirements with the requirements (refs R1, R2, …, each with EARS acceptance criteria). If it returns errors, fix them and call it again. Foundry writes the ## Requirements section of spec.md from them, so leave that section to Foundry.",
-      "Then analyse the requirements for ambiguity, conflicts and gaps, and put the findings under ## Analysis. End your turn.",
+      `Then analyse the requirements for ambiguity, conflicts and gaps, and put the findings under ## Analysis.${end ? " End your turn." : ""}`,
     ].join("\n");
   }
 
@@ -130,9 +148,15 @@ export class Planning {
   private tasksSteps(f: Feature) {
     const dir = featureDir(f.slug);
     return [
-      `The plan is approved. Read ${dir}/spec.md and plan.md, then call propose_tasks with the task graph.`,
+      `The plan is approved. Read ${dir}/spec.md and plan.md, then ${this.taskRules()} End your turn.`,
+    ].join("\n");
+  }
+
+  private taskRules() {
+    return [
+      "call propose_tasks with the task graph.",
       "Each task has a ref (T1, T2, …), title, description, exit_criteria, requirement_refs (together they must cover every requirement), depends_on (task refs, each with a reason), touches (paths from the plan), size (S, M or L) and checks.scripts (names of paseo.json scripts).",
-      "Do not write tasks.md; Foundry writes it. If propose_tasks returns errors, fix them and call it again. End your turn.",
+      "Do not write tasks.md; Foundry writes it. If propose_tasks returns errors, fix them and call it again.",
     ].join("\n");
   }
 
@@ -275,6 +299,7 @@ export class Planning {
       await this.writeTasksDoc(f, prop.id);
       return;
     }
+    if (stage === "quick") return this.afterQuickTurn(f);
     if (stage === "clarify" || stage === "spec") {
       if (this.openQuestions(f.id).length) {
         this.store.event("awaiting_answers", { actor: "system", project: f.project_id, feature: f.id });
@@ -296,6 +321,24 @@ export class Planning {
       if (!prop) return this.failTurn(f.id, "The project manager ended its turn without calling propose_tasks.");
       await this.writeTasksDoc(f, prop.id);
     }
+  }
+
+  /** A Quick-flow turn ends in Tasks once spec, requirements, plan and a task proposal all exist and no question is open. */
+  private async afterQuickTurn(f: Feature) {
+    if (this.openQuestions(f.id).length) {
+      this.store.event("awaiting_answers", { actor: "system", project: f.project_id, feature: f.id });
+      return;
+    }
+    const dir = featureDir(f.slug);
+    if (!this.docExists(f, "spec")) return this.failTurn(f.id, `The project manager ended its turn without writing ${dir}/spec.md.`);
+    if (!this.store.requirements(f.id).length) return this.failTurn(f.id, "The project manager ended its turn without calling propose_requirements.");
+    if (!this.docExists(f, "plan")) return this.failTurn(f.id, `The project manager ended its turn without writing ${dir}/plan.md.`);
+    const prop = this.store.proposal(f.id);
+    if (!prop || prop.status !== "proposed") return this.failTurn(f.id, "The project manager ended its turn without calling propose_tasks.");
+    this.store.updateDoc(f.id, "spec", { status: "in_review" });
+    this.store.updateDoc(f.id, "plan", { status: "in_review" });
+    await this.writeTasksDoc(this.store.feature(f.id)!, prop.id);
+    if (f.stage !== "tasks") this.store.setStage(f.id, "tasks");
   }
 
   /** Foundry writes tasks.md from the current proposal and commits it; its SHA is what approval names. */
@@ -325,6 +368,7 @@ export class Planning {
   async askQuestions(agentId: string, questions: ClarifyQuestion[], signal?: AbortSignal): Promise<string> {
     const f = this.plannerFeature(agentId);
     if (!["clarify", "spec"].includes(f.stage)) throw new FoundryError("TOOL_REFUSED", "Clarify questions are asked before the spec is approved");
+    if (this.quick(f) && this.turns.get(f.id)!.stage !== "quick") throw new FoundryError("TOOL_REFUSED", "Clarify questions are asked in the first turn of a Quick-flow feature");
     const limit = this.rounds(f);
     if (f.clarify_rounds >= limit)
       throw new FoundryError("ROUNDS_USED", `No Clarify round is left (grill ${f.grill ?? "light"} allows ${limit}). Decide with sensible defaults and list them under Decisions.`);
@@ -392,7 +436,7 @@ export class Planning {
       live(answers);
       return { delivered: "live" };
     }
-    await this.runTurn(featureId, f.stage, `Answers to your Clarify questions:\n${formatAnswers(answers)}\n\n${this.specSteps(featureDir(f.slug))}`);
+    await this.runTurn(featureId, this.quick(f) ? "quick" : f.stage, `Answers to your Clarify questions:\n${formatAnswers(answers)}\n\n${this.afterClarify(f)}`);
     return { delivered: "turn" };
   }
 
@@ -400,7 +444,7 @@ export class Planning {
   proposeRequirements(agentId: string, reqs: ProposedRequirement[]) {
     const f = this.plannerFeature(agentId);
     const kind = this.turns.get(f.id)!.stage;
-    if (!["clarify", "spec"].includes(f.stage) && kind !== "spec_change") throw new FoundryError("TOOL_REFUSED", "Requirements change with the spec: in Clarify or Spec, or in a spec-change turn");
+    if (!["clarify", "spec"].includes(f.stage) && kind !== "spec_change" && kind !== "quick") throw new FoundryError("TOOL_REFUSED", "Requirements change with the spec: in Clarify or Spec, or in a spec-change turn");
     const errors = lintRequirements(reqs);
     const approved = this.store.approvedRequirements(f.id).map((r) => ({ ref: r.ref, title: r.title, criteria: parse<string[]>(r.criteria, []) }));
     errors.push(...renumbered(approved, reqs.map((r) => ({ ref: r.ref, title: r.title, criteria: r.acceptance_criteria }))));
@@ -420,7 +464,7 @@ export class Planning {
   proposeTasks(agentId: string, tasks: ProposedTask[]) {
     const f = this.plannerFeature(agentId);
     if (this.turns.get(f.id)!.stage === "change_set") return this.proposeChangeSet(f, tasks);
-    if (f.stage !== "tasks") throw new FoundryError("TOOL_REFUSED", "Tasks are proposed once the plan is approved, or in a change turn");
+    if (f.stage !== "tasks" && this.turns.get(f.id)!.stage !== "quick") throw new FoundryError("TOOL_REFUSED", "Tasks are proposed once the plan is approved, or in a change turn");
     const reqs = this.store.requirements(f.id).map((r) => r.ref);
     const result = validateTasks(tasks, reqs, this.unfinishedIssues(f));
     const prop = this.store.addProposal(f.id, tasks, result);
@@ -444,6 +488,10 @@ export class Planning {
     return f;
   }
 
+  private notQuick(f: Feature) {
+    if (this.quick(f)) throw new FoundryError("QUICK_FLOW", "A Quick-flow feature is approved once, at the task list");
+  }
+
   private assertDoc(f: Feature, kind: DocKind, sha: string) {
     const d = this.store.doc(f.id, kind)!;
     if (d.status !== "in_review") throw new FoundryError("NOT_IN_REVIEW", `The ${kind} is ${d.status}, not waiting for your review`);
@@ -454,6 +502,7 @@ export class Planning {
     if (this.store.feature(featureId)?.spec_change_open) return this.approveChangedSpec(featureId, sha, actor);
     await this.locks.with(`feature:${featureId}`, async () => {
       const f = this.editable(featureId);
+      this.notQuick(f);
       if (f.stage !== "spec") throw new FoundryError("WRONG_STAGE", `The feature is in ${f.stage}, not Spec`);
       this.assertDoc(f, "spec", sha);
       const reqs = this.store.requirements(f.id);
@@ -475,6 +524,7 @@ export class Planning {
   async approvePlan(featureId: number, sha: string, actor: Actor = "you") {
     await this.locks.with(`feature:${featureId}`, async () => {
       const f = this.editable(featureId);
+      this.notQuick(f);
       if (f.stage !== "plan") throw new FoundryError("WRONG_STAGE", `The feature is in ${f.stage}, not Plan`);
       this.assertDoc(f, "plan", sha);
       this.store.tx(() => {
@@ -520,7 +570,7 @@ export class Planning {
   }
 
   /** Approve the task list at the proposal and tasks.md SHA you read: one issue per live task. */
-  async approveTasks(featureId: number, proposalId: number, sha: string, actor: Actor = "you") {
+  async approveTasks(featureId: number, proposalId: number, sha: string, actor: Actor = "you", docs: { spec?: string; plan?: string } = {}) {
     if (this.store.proposal(featureId)?.kind === "change") return this.approveChangeSet(featureId, proposalId, sha, actor);
     const keys = await this.locks.with(`feature:${featureId}`, async () => {
       const f = this.editable(featureId);
@@ -528,6 +578,15 @@ export class Planning {
       const prop = this.store.proposal(f.id);
       if (!prop || prop.id !== proposalId) throw new FoundryError("PROPOSAL_CHANGED", "The task list changed: review the current one", { current: prop?.id ?? null });
       this.assertDoc(f, "tasks", sha);
+      if (this.quick(f)) {
+        // One approval for all three: it names the spec and plan SHAs you read too.
+        if (!docs.spec || !docs.plan) throw new FoundryError("SHA_REQUIRED", "A Quick-flow approval names the spec and plan SHAs you read");
+        this.assertDoc(f, "spec", docs.spec);
+        this.assertDoc(f, "plan", docs.plan);
+        const reqs = this.store.requirements(f.id);
+        const errors = lintRequirements(reqs.map((r) => ({ ref: r.ref, title: r.title, acceptance_criteria: parse<string[]>(r.criteria, []) })));
+        if (errors.length) throw new FoundryError("REQUIREMENTS_INVALID", errors.join("\n"), { errors });
+      }
       const cut = parse<string[]>(prop.cut, []);
       const all = parse<ProposedTask[]>(prop.tasks, []);
       const tasks = all.map((t) => ({ ...t, depends_on: (t.depends_on ?? []).filter((d) => !cut.includes(d.ref)) }));
@@ -563,6 +622,13 @@ export class Planning {
             keyOf.set(ref, i.key);
           }
         this.store.run("UPDATE task_proposals SET status='approved' WHERE id=?", prop.id);
+        if (this.quick(f)) {
+          this.store.updateDoc(f.id, "spec", { status: "approved", approved_sha: docs.spec! });
+          this.store.updateDoc(f.id, "plan", { status: "approved", approved_sha: docs.plan! });
+          this.store.run("UPDATE requirements SET spec_sha=? WHERE feature_id=? AND retired=0", docs.spec!, f.id);
+          this.store.approveRequirements(f.id);
+          for (const k of ["spec", "plan"] as const) this.store.event("doc_approved", { actor, project: f.project_id, feature: f.id, detail: { doc: k, sha: docs[k] } });
+        }
         this.store.updateDoc(f.id, "tasks", { status: "approved", approved_sha: sha });
         this.store.event("tasks_approved", { actor, project: f.project_id, feature: f.id, detail: { proposal: prop.id, issues: Object.fromEntries(keyOf), cut } });
         this.store.setStage(f.id, "build", actor);
@@ -577,6 +643,7 @@ export class Planning {
   async revise(featureId: number, kind: DocKind, note: string, actor: Actor = "you") {
     if (!note.trim()) throw new FoundryError("FEEDBACK_REQUIRED", "A revision request needs a note");
     const f = this.editable(featureId);
+    if (this.quick(f) && f.stage === "tasks") return this.reviseQuick(f, kind, note, actor);
     const stageOf: Record<DocKind, FeatureStage> = { spec: "spec", plan: "plan", tasks: "tasks" };
     if (f.stage !== stageOf[kind]) throw new FoundryError("WRONG_STAGE", `The feature is in ${f.stage}; the ${kind} can be revised in ${stageOf[kind]}`);
     const dir = featureDir(f.slug);
@@ -594,10 +661,33 @@ export class Planning {
     return { ok: true };
   }
 
+  /** Quick flow: a revision of any doc is one turn that keeps all three consistent and re-proposes the tasks. */
+  private async reviseQuick(f: Feature, kind: DocKind, note: string, actor: Actor) {
+    const dir = featureDir(f.slug);
+    this.store.tx(() => {
+      // The revised list must come from this turn.
+      this.store.run("UPDATE task_proposals SET status='superseded' WHERE feature_id=? AND status='proposed'", f.id);
+      this.store.event("revision_requested", { actor, project: f.project_id, feature: f.id, detail: { doc: kind, note } });
+    });
+    await this.runTurn(
+      f.id,
+      "quick",
+      [
+        `The developer asks for a revision of the ${kind}:\n\n${note}`,
+        `Do what the note asks; if it is unclear or conflicts with the docs, say so in your reply instead of reinterpreting it. Keep ${dir}/spec.md (call propose_requirements again if requirements change, keeping unchanged refs) and ${dir}/plan.md consistent with the change, then call propose_tasks again with the full task graph. Do not write tasks.md. End your turn.`,
+      ].join("\n\n"),
+    );
+    return { ok: true };
+  }
+
   /** Run the stage's turn again after a failure. */
   async retry(featureId: number) {
     const f = this.editable(featureId);
     const steps: Partial<Record<FeatureStage, string>> = { clarify: this.clarifySteps(f), spec: this.specSteps(featureDir(f.slug)), plan: this.planSteps(f), tasks: this.tasksSteps(f) };
+    if (this.quick(f) && ["clarify", "tasks"].includes(f.stage)) {
+      await this.runTurn(f.id, "quick", `Your last turn did not finish. Continue:\n\n${this.clarifySteps(f)}`);
+      return { ok: true };
+    }
     const s = steps[f.stage];
     if (!s) throw new FoundryError("WRONG_STAGE", `Nothing to plan in ${f.stage}`);
     await this.runTurn(f.id, f.stage, `Your last turn did not finish. Continue:\n\n${s}`);
@@ -660,17 +750,22 @@ export class Planning {
           for (const k of later) if (["approved", "in_review"].includes(this.store.doc(f.id, k)!.status)) this.store.updateDoc(f.id, k, { status: "stale" });
         if (!building) {
           this.store.run("UPDATE task_proposals SET status='superseded' WHERE feature_id=? AND status='proposed'", f.id);
-          if (kind === "spec" && f.stage !== "spec") this.store.setStage(f.id, "spec", actor);
-          if (kind === "plan" && f.stage === "tasks") this.store.setStage(f.id, "plan", actor);
+          // The Quick flow has no Spec or Plan stage to go back to: it stays in Tasks and re-proposes.
+          if (!this.quick(f) && kind === "spec" && f.stage !== "spec") this.store.setStage(f.id, "spec", actor);
+          if (!this.quick(f) && kind === "plan" && f.stage === "tasks") this.store.setStage(f.id, "plan", actor);
         } else if (!this.store.openSpecChange(f.id)) {
           this.store.run("INSERT INTO spec_changes(feature_id,base_spec_sha,diff) VALUES(?,?,?)", f.id, d.approved_sha, JSON.stringify({ base: this.approvedList(f.id) }));
           this.store.updateFeature(f.id, { spec_change_open: 1 });
           this.store.event("spec_change_opened", { actor, project: f.project_id, feature: f.id, detail: { base: d.approved_sha } });
         }
       });
-      return { changed: true, sha: commit, building } as const;
+      return { changed: true, sha: commit, building, quick: this.quick(f) && !building } as const;
     });
-    if (r.changed && kind === "spec") {
+    if (r.changed && r.quick) {
+      const dir = featureDir(this.store.feature(featureId)!.slug);
+      const msg = `The developer edited ${dir}/${DOC_FILES[kind]}. Re-read the docs. ${kind === "spec" ? "Call propose_requirements with the requirements as they now stand (keep unchanged refs, never reuse a removed ref), bring plan.md in line, " : "Bring the task graph in line with the plan: "}then call propose_tasks again with the full task graph. Do not write tasks.md. End your turn.`;
+      await this.runTurn(featureId, "quick", msg).catch((e) => this.failTurn(featureId, String(e)));
+    } else if (r.changed && kind === "spec") {
       const msg = `The developer edited ${featureDir(this.store.feature(featureId)!.slug)}/spec.md. Re-read it and call propose_requirements with the requirements as they now stand. Keep the ref of every requirement you don't change and never reuse a removed ref. Change nothing else, then end your turn.`;
       await this.runTurn(featureId, r.building ? "spec_change" : "spec", msg).catch((e) => this.failTurn(featureId, String(e)));
     }
@@ -863,7 +958,8 @@ export class Planning {
       if (status === "running") {
         // Its turn.after will arrive; track it so the guard and stage logic run.
         const f = this.store.feature(r.feature_id)!;
-        this.turns.set(r.feature_id, { agentId: r.agent_id, runId: r.id, stage: f.stage, timer: null });
+        const stage = (parse<{ stage?: TurnKind }>(this.store.get<{ detail: string }>("SELECT detail FROM runs WHERE id=?", r.id)?.detail ?? "{}", {}).stage ?? f.stage) as TurnKind;
+        this.turns.set(r.feature_id, { agentId: r.agent_id, runId: r.id, stage, timer: null });
         continue;
       }
       this.store.endRun(r.id, "failed", { reason: "infra: restarted" });
