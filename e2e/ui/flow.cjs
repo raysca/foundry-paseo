@@ -74,6 +74,16 @@ const log = (...a) => console.log(`[${new Date().toISOString().slice(11, 19)}]`,
     await shot("spec");
   });
 
+  await step("comment on a line of the spec", async () => {
+    await press("Comment on lines");
+    await main().getByText("## Goal", { exact: true }).locator("visible=true").first().click();
+    await p.getByPlaceholder(/Comment on line/).locator("visible=true").first().fill("Say who shouts: the CLI.");
+    await press("Save comment");
+    await see("not sent yet");
+    await shot("spec-comment");
+    await press("Back to the doc");
+  });
+
   await step("approve the spec", async () => {
     await press(/^Approve spec\.md at/, false);
     await see("Approve plan.md at");

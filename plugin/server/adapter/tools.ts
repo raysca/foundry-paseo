@@ -204,5 +204,21 @@ export function buildTools(f: Foundry): ToolSet {
   ];
 
   const none: AgentToolDefinition[] = [];
-  return { builder: [askHuman, verdict("builder")], reviewer: [verdict("reviewer"), reportRequirements], planner: [askQuestions, proposeRequirements, proposeTasks], pm: pmTools };
+  const commentOnDoc = defineAgentTool({
+    name: "comment_on_doc",
+    title: "Comment on a doc line",
+    description:
+      "Leave the developer a comment on one line of the feature's spec.md, plan.md or tasks.md (line numbers from 1, as the file stands now): a clash you found with work in flight, or your reply to one of their comments that is unclear or conflicts with the doc.",
+    input: z.object({ doc: z.enum(["spec", "plan", "tasks"]), line: z.number().int().min(1), body: z.string().min(1) }),
+    async execute({ doc, line, body }, { agent }) {
+      try {
+        guardRole(f, agent.id, "planner");
+        return ok(await f.planning.pmComment(agent.id, doc, line, body));
+      } catch (e) {
+        return refusal(e);
+      }
+    },
+  });
+
+  return { builder: [askHuman, verdict("builder")], reviewer: [verdict("reviewer"), reportRequirements], planner: [askQuestions, proposeRequirements, proposeTasks, commentOnDoc], pm: pmTools };
 }

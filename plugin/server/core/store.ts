@@ -156,6 +156,21 @@ export interface AgentRecord {
   created_at: string;
 }
 
+export type CommentStatus = "saved" | "sent";
+export interface DocComment {
+  id: number;
+  feature_id: number;
+  doc: DocKind;
+  sha: string;
+  line: number;
+  quote: string;
+  body: string;
+  author: "you" | "pm";
+  status: CommentStatus;
+  created_at: string;
+  sent_at: string | null;
+}
+
 export interface Question {
   id: number;
   issue_key: string | null;
@@ -378,6 +393,13 @@ export const MIGRATIONS: readonly string[] = [
   `CREATE TABLE branches (
      repo TEXT NOT NULL, branch TEXT NOT NULL, purpose TEXT NOT NULL,
      created_at TEXT NOT NULL DEFAULT (datetime('now')), PRIMARY KEY(repo, branch));`,
+  // 9: comments on lines of a feature's docs (yours, saved then sent in a revision request; or the PM's)
+  `CREATE TABLE doc_comments (
+     id INTEGER PRIMARY KEY, feature_id INTEGER NOT NULL REFERENCES features(id), doc TEXT NOT NULL,
+     sha TEXT NOT NULL, line INTEGER NOT NULL, quote TEXT NOT NULL DEFAULT '', body TEXT NOT NULL,
+     author TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'saved', created_at TEXT NOT NULL DEFAULT (datetime('now')),
+     sent_at TEXT);
+   CREATE INDEX doc_comments_feature ON doc_comments(feature_id, doc);`,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
@@ -696,6 +718,30 @@ export class Store {
   openSpecChange(featureId: number) {
     return this.get<SpecChange>("SELECT * FROM spec_changes WHERE feature_id=? AND status='open' ORDER BY id DESC LIMIT 1", featureId);
   }
+  // ---------- doc comments ----------
+  addComment(c: { featureId: number; doc: DocKind; sha: string; line: number; quote: string; body: string; author: "you" | "pm"; status?: CommentStatus }): DocComment {
+    const r = this.run(
+      "INSERT INTO doc_comments(feature_id,doc,sha,line,quote,body,author,status) VALUES(?,?,?,?,?,?,?,?)",
+      c.featureId,
+      c.doc,
+      c.sha,
+      c.line,
+      c.quote,
+      c.body,
+      c.author,
+      c.status ?? "saved",
+    );
+    return this.comment(Number(r.lastInsertRowid))!;
+  }
+  comment(id: number) {
+    return this.get<DocComment>("SELECT * FROM doc_comments WHERE id=?", id);
+  }
+  comments(featureId: number, doc?: DocKind) {
+    return doc
+      ? this.all<DocComment>("SELECT * FROM doc_comments WHERE feature_id=? AND doc=? ORDER BY id", featureId, doc)
+      : this.all<DocComment>("SELECT * FROM doc_comments WHERE feature_id=? ORDER BY id", featureId);
+  }
+
   proposal(featureId: number) {
     return this.get<TaskProposal>("SELECT * FROM task_proposals WHERE feature_id=? AND status='proposed' ORDER BY id DESC LIMIT 1", featureId);
   }

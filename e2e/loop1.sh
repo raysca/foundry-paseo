@@ -24,6 +24,12 @@ wait_for "any(x['feature_id']==$FID and x['status']=='waiting' for x in d['quest
 fact feature.answer "{\"id\":$FID,\"answers\":{\"short_flag\":\"\"}}" | ok "answered (recommended)"
 wait_for "$(feat)['stage']=='spec'" 120 "spec ready for review"
 
+log "comment on a line of the spec, then send it with a revision request"
+CID=$(fact feature.comment "{\"id\":$FID,\"kind\":\"spec\",\"sha\":\"$(docsha spec)\",\"line\":1,\"body\":\"Keep the title short.\"}" | python3 -c "import json,sys;r=json.load(sys.stdin);assert r['status']=='saved', r;print(r['id'])")
+fact feature.revise "{\"id\":$FID,\"kind\":\"spec\",\"note\":\"\",\"comments\":[$CID]}" | ok "revision sent with comment $CID"
+wait_for "not $(feat)['planning_busy'] and any(c['id']==$CID and c['status']=='sent' for c in d['comments'])" 120 "comment sent, revision turn over"
+fact feature.revisions "{\"id\":$FID,\"kind\":\"spec\"}" | python3 -c "import json,sys;r=json.load(sys.stdin);assert r['revisions'] and r['revisions'][0]['head'], r;print(len(r['revisions']),'spec revision(s)')"
+
 log "approve the spec at its SHA (a stale SHA is refused)"
 fact feature.approve_spec "{\"id\":$FID,\"sha\":\"0000000000000000000000000000000000000000\"}" \
   | python3 -c "import json,sys;r=json.load(sys.stdin);assert r['error']['code']=='STALE_APPROVAL', r;print('STALE_APPROVAL')"

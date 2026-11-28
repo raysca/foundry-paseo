@@ -7,7 +7,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { Text, View } from "react-native";
 import { actionRpc } from "../shared/rpc";
-import { Badge, Btn, Card, Choice, Field, go, Page, parseJson, Row, SCREEN, Section, short, STATUS_TONE, T, Themed, useAct, useColors, useFoundry } from "./kit";
+import { Badge, Btn, Card, Choice, Field, go, Page, parseJson, Row, SCREEN, Section, short, STATUS_TONE, T, Themed, useAct, useFoundry, DiffLines } from "./kit";
 
 export function IssueScreen(props: PluginScreenProps) {
   return (
@@ -156,21 +156,11 @@ function Runs({ runs }: { runs: any[] }) {
 }
 
 function Diff({ stat, diff }: { stat: string; diff: string }) {
-  const c = useColors();
   if (!diff) return <Section title="Changes"><T muted>No changes against the feature branch yet.</T></Section>;
   return (
     <Section title="Changes against the feature branch">
       <T mono size={12} muted>{stat}</T>
-      <View style={{ backgroundColor: c.surface0, borderColor: c.border, borderWidth: 1, borderRadius: 6, padding: 8 }}>
-        {diff.split("\n").slice(0, 4000).map((line, n) => {
-          const color = line.startsWith("+") && !line.startsWith("+++") ? c.statusSuccess : line.startsWith("-") && !line.startsWith("---") ? c.statusDanger : line.startsWith("@@") ? c.accent : line.startsWith("diff ") ? c.foreground : c.foregroundMuted;
-          return (
-            <Text key={n} selectable style={{ color, fontFamily: "monospace", fontSize: 12, fontWeight: line.startsWith("diff ") ? "600" : "400" }}>
-              {line || " "}
-            </Text>
-          );
-        })}
-      </View>
+      <DiffLines diff={diff} />
     </Section>
   );
 }
