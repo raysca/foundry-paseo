@@ -116,6 +116,7 @@ export function buildTools(f: Foundry): ToolSet {
           depends_on: z.array(z.object({ ref: z.string(), reason: z.string() })).optional(),
           touches: z.array(z.string()).optional(),
           size: z.enum(["S", "M", "L"]).optional(),
+          // backend, frontend, bugfix, docs or a project loop in .foundry/loops; left out: the project default.
           loop: z.string().optional(),
           checks: z.object({ scripts: z.array(z.string()).optional(), paths: z.array(z.string()).optional() }).optional(),
           profile: z.string().optional(),

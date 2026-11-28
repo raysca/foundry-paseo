@@ -11,7 +11,7 @@ import { assertIntegrationUntouched, featureDir } from "./features";
 import { changedPaths, FOUNDRY_IDENT, git, head, identEnv, sh, treeOf } from "./git";
 import type { Host } from "./host";
 import type { Locks } from "./locks";
-import { resolveLoop, type LoopStep } from "./loops";
+import { projectLoops, resolveLoop, type LoopStep } from "./loops";
 import { createPr, editPrBase, firstRemote, pushBranch, redact, viewPr, type PrInfo } from "./github";
 import { FoundryError, type Actor } from "./model";
 import { activeSlices, frontSlice, issuesThrough, openPromoted, parentRef, pickTarget, requirementsThrough, setTargetHead, setTargetStage, shipFront, shipKey, sliceOfIssue, startNextSlice, target, type Promotion, type Target } from "./slices";
@@ -177,7 +177,7 @@ export class Delivery {
         for (const s of c.scripts ?? []) if (!union.scripts!.includes(s)) union.scripts!.push(s);
         for (const x of c.paths ?? []) if (!union.paths!.includes(x)) union.paths!.push(x);
       }
-      const loop = resolveLoop(null, p.default_loop);
+      const loop = resolveLoop(null, p.default_loop, await projectLoops(p.repo, p.base_ref));
       const step = (loop.steps.find((s) => s.kind === "check") as Extract<LoopStep, { kind: "check" }>) ?? { kind: "check", name: "check" };
       const resolved = resolveChecks(step, union, await paseoScripts(p.repo, p.base_ref));
       const fromBase = await filesFromBase(p.repo, p.base_ref, resolved.scripts);

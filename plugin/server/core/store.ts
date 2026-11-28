@@ -706,6 +706,13 @@ export class Store {
     this.event("project_ship_mode", { actor, project: id, detail: { from: p.ship_mode, to: mode } });
     return this.project(id)!;
   }
+  setDefaultLoop(id: number, loop: string | null, actor: Actor = "you") {
+    const p = this.project(id);
+    if (!p) throw new FoundryError("NOT_FOUND", `No project ${id}`);
+    this.run("UPDATE projects SET default_loop=? WHERE id=?", loop, id);
+    this.event("project_default_loop", { actor, project: id, detail: { from: p.default_loop, to: loop } });
+    return this.project(id)!;
+  }
   projectByKey(key: string) {
     return this.get<Project>("SELECT * FROM projects WHERE key=?", key);
   }

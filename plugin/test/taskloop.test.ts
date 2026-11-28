@@ -327,7 +327,7 @@ test("a builder that cannot start leaves the task Blocked with INFRA_ERROR", asy
 
 test("an unknown loop flags the task LOOP_MISSING and it is not auto-started", async () => {
   const { store, loop, issue } = await setup();
-  const i = issue("Add shout", { loop: "frontend", status: "Ready" });
+  const i = issue("Add shout", { loop: "mobile", status: "Ready" });
   await assert.rejects(loop.start(i.key, "you"), code("LOOP_MISSING"));
   assert.equal(store.issue(i.key)!.flag, "LOOP_MISSING");
   await loop.tick();

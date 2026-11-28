@@ -7,7 +7,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { actionRpc } from "../shared/rpc";
 import { Pressable, Text, View } from "react-native";
-import { Badge, Btn, Card, Choice, DiffLines, Empty, Field, go, Page, parseJson, Progress, Row, SCREEN, Section, short, STATUS_TONE, T, Themed, useAct, useColors, useFoundry, type State } from "./kit";
+import { Badge, Btn, Card, Choice, DiffLines, Empty, Field, go, LoopPick, Page, parseJson, Progress, Row, SCREEN, Section, short, STATUS_TONE, T, Themed, useAct, useColors, useFoundry, type State } from "./kit";
 
 export function FeatureScreen(props: PluginScreenProps) {
   return (
@@ -475,6 +475,7 @@ function Proposal({ s, f }: { s: State; f: any }) {
               <T bold>{id}</T>
               <T>{t.title || s.issues.find((x) => x.key === t.issue)?.title || ""}</T>
               {t.size ? <Badge label={t.size} /> : null}
+              {t.loop ? <Badge label={`${t.loop} loop`} tone="muted" /> : null}
               {isCut ? <Badge label="cut" tone="warning" /> : null}
             </Row>
             {t.description ? <T muted size={13}>{t.description}</T> : null}
@@ -485,6 +486,7 @@ function Proposal({ s, f }: { s: State; f: any }) {
             {editable ? (
               <Row wrap>
                 <Btn label={isCut ? "Put back" : "Cut"} onPress={() => void act.run("feature.cut_task", { id: f.id, ref: t.ref, cut: !isCut })} />
+                <LoopPick projectId={f.project_id} value={t.loop} onChange={(loop) => void act.run("feature.edit_slices", { id: f.id, op: { kind: "set_loop", ref: t.ref, loop } })} />
                 {[...slices.map((x) => x.n), slices.length + 1]
                   .filter((n) => n !== (t.slice ?? 1))
                   .map((n) => (

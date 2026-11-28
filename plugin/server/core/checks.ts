@@ -37,7 +37,8 @@ export interface ResolvedChecks {
 /** The scripts and required paths one check step runs for one task: the step's, plus the task's own. */
 export function resolveChecks(step: Extract<LoopStep, { kind: "check" }>, task: TaskChecks, available: PaseoScript[]): ResolvedChecks {
   const byName = new Map(available.map((s) => [s.name, s]));
-  const wanted = step.scripts?.length ? [...step.scripts] : available.map((s) => s.name);
+  // No scripts named: every paseo.json script; an empty list: none (only the task's own checks).
+  const wanted = step.scripts ? [...step.scripts] : available.map((s) => s.name);
   for (const s of task.scripts ?? []) if (!wanted.includes(s)) wanted.push(s);
   const scripts: PaseoScript[] = [];
   const unknown: string[] = [];

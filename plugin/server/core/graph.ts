@@ -390,9 +390,9 @@ export function renderTasks(title: string, tasks: ProposedTask[], g: GraphResult
     const checks = [...(t.checks?.scripts ?? []), ...(t.checks?.paths ?? []).map((p) => `path ${p}`)].join(", ");
     // A change set's new task says which slice it joins.
     const where = existing.length && t.slice ? ` (slice ${t.slice})` : "";
-    return `| ${r} | ${esc(t.title)}${where} | ${(t.requirement_refs ?? []).join(", ")} | ${esc(dep)} | ${t.size ?? ""} | ${esc(checks)} |`;
+    return `| ${r} | ${esc(t.title)}${where} | ${(t.requirement_refs ?? []).join(", ")} | ${esc(dep)} | ${t.size ?? ""} | ${t.loop ?? "default"} | ${esc(checks)} |`;
   };
-  const head = ["| Ref | Task | Covers | Depends on | Size | Checks |", "|---|---|---|---|---|---|"];
+  const head = ["| Ref | Task | Covers | Depends on | Size | Loop | Checks |", "|---|---|---|---|---|---|---|"];
   if (slices.length > 1)
     // One section per slice, in merge order; inside it the slice's tasks by wave.
     for (const sl of slices) {
@@ -441,4 +441,26 @@ export function withRequirements(doc: string, block: string): string {
   const oos = lines.findIndex((l) => /^##\s+Out of scope\b/i.test(l));
   const at = oos >= 0 ? oos : lines.length;
   return [...lines.slice(0, at), "## Requirements", "", block, "", ...lines.slice(at)].join("\n");
+}
+
+const DOC_PATH = /(^|\/)(docs?|documentation)\/|\.(md|mdx|rst|txt|adoc)$|(^|\/)(README|CHANGELOG|LICENSE)[^/]*$/i;
+
+/**
+ * The loop each task names must exist (a built-in or a valid loop in .foundry/loops on base). Warns when
+ * a pick looks wrong for what the task touches.
+ */
+export function checkLoops(tasks: ProposedTask[], available: string[], invalid: Record<string, string[]> = {}): string[] {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+  for (const t of tasks) {
+    if (!t.loop) continue;
+    const ref = t.issue ?? t.ref;
+    if (invalid[t.loop]) errors.push(`${ref} names loop "${t.loop}", whose file in .foundry/loops is invalid: ${invalid[t.loop]!.join(" ")}`);
+    else if (!available.includes(t.loop)) errors.push(`${ref} names loop "${t.loop}", which doesn't exist. Pick one of: ${available.join(", ")}.`);
+    const code = (t.touches ?? []).filter((p) => !DOC_PATH.test(p));
+    if (t.loop === "docs" && code.length) warnings.push(`${ref} is on the docs loop but touches ${code.join(", ")}; the docs loop runs no project checks.`);
+    if (t.loop !== "docs" && (t.touches ?? []).length && !code.length) warnings.push(`${ref} only touches docs; the docs loop fits it.`);
+  }
+  if (errors.length) throw new FoundryError("TASKS_INVALID", `The task list was not recorded. Fix and resend:\n- ${errors.join("\n- ")}`, { errors });
+  return warnings;
 }

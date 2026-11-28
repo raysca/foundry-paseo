@@ -7,7 +7,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { Text, View } from "react-native";
 import { actionRpc } from "../shared/rpc";
-import { Badge, Btn, Card, Choice, Field, go, Page, parseJson, Row, SCREEN, Section, short, STATUS_TONE, T, Themed, useAct, useFoundry, DiffLines } from "./kit";
+import { Badge, Btn, Card, Choice, Field, go, LoopPick, Page, parseJson, Row, SCREEN, Section, short, STATUS_TONE, T, Themed, useAct, useFoundry, DiffLines } from "./kit";
 
 export function IssueScreen(props: PluginScreenProps) {
   return (
@@ -58,6 +58,7 @@ function Issue({ issueKey, openAgent }: { issueKey: string; openAgent?: (agentId
         {i.description ? <T size={13}>{i.description}</T> : null}
         {i.acceptance ? <T muted size={13}>Exit criteria: {i.acceptance}</T> : null}
         {parseJson<string[]>(i.requirement_refs, []).length ? <T muted size={12}>Covers {parseJson<string[]>(i.requirement_refs, []).join(", ")}</T> : null}
+        <LoopRow issue={i} attempt={a} />
         {a ? (
           <Row wrap>
             <T muted size={12} mono>attempt {a.n} · {a.branch} · step {a.step}{a.head_sha ? ` · head ${short(a.head_sha)}` : ""}</T>
@@ -180,5 +181,26 @@ function Diff({ stat, diff }: { stat: string; diff: string }) {
       <T mono size={12} muted>{stat}</T>
       <DiffLines diff={diff} />
     </Section>
+  );
+}
+
+/**
+ * The task's loop: the steps its latest attempt runs (frozen when it started), the step it is on, and
+ * a picker while the task isn't running (the next attempt runs the new loop).
+ */
+function LoopRow({ issue, attempt }: { issue: any; attempt: any }) {
+  const act = useAct();
+  const frozen = attempt ? parseJson<any>(attempt.loop, null) : null;
+  const idle = ["Backlog", "Ready", "Failed", "Blocked"].includes(issue.status);
+  return (
+    <View style={{ gap: 4 }}>
+      <Row wrap>
+        <T muted size={12}>Loop: {frozen?.name ?? issue.loop ?? "project default"}</T>
+        {(frozen?.steps ?? []).map((st: any, n: number) => (
+          <Badge key={st.name} label={`${n + 1}. ${st.name}`} tone={attempt && !attempt.ended_at && attempt.step === st.name ? "info" : "muted"} />
+        ))}
+      </Row>
+      {idle ? <LoopPick projectId={issue.project_id} value={issue.loop} onChange={(loop) => void act.run("issue.set_loop", { key: issue.key, loop })} /> : null}
+    </View>
   );
 }

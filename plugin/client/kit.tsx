@@ -289,3 +289,26 @@ export function DiffLines({ diff, max = 4000 }: { diff: string; max?: number }) 
     </View>
   );
 }
+
+/** The loops a project can use (built-ins and its own .foundry/loops on base), with invalid loop files. */
+export function useLoops(projectId: number | undefined) {
+  const action = useRpc(actionRpc);
+  return useQuery({
+    queryKey: ["foundry-loops", projectId],
+    enabled: projectId !== undefined,
+    queryFn: () => action({ action: "project.loops", args: { id: projectId } }) as Promise<{ default: string; loops: { name: string; source: string; steps: { kind: string; name: string }[] }[]; invalid: { name: string; errors: string[] }[] }>,
+  });
+}
+
+/** Pick a loop: the project's default (empty value) or a named one. */
+export function LoopPick({ projectId, value, onChange }: { projectId: number; value: string | null | undefined; onChange: (loop: string | null) => void }) {
+  const loops = useLoops(projectId);
+  if (!loops.data?.loops) return null;
+  return (
+    <Choice
+      value={value ?? ""}
+      onChange={(v) => onChange(v || null)}
+      options={[{ value: "", label: `default (${loops.data.default})` }, ...loops.data.loops.map((l) => ({ value: l.name, label: l.source === "project" ? `${l.name} (project)` : l.name }))]}
+    />
+  );
+}
