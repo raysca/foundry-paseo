@@ -14,6 +14,7 @@ export const CHANGES: Change[] = [
       "Quick flow: pick it when you create a feature, and the project manager writes the spec, plan and task list in one turn. You approve all three at once.",
       "Comment on lines of a spec, plan or task list, then send your comments with a revision request. The project manager can comment back, you resolve comments when they are dealt with, and a comment follows its line to the next revision when that line is unchanged. Approve warns you while comments are still open.",
       "Each doc lists its revisions and shows the diff between any two.",
+      "Ship by GitHub pull request: Prepare pushes the feature branch and opens a PR with gh when the repo has a remote. Foundry checks the PR every 5 minutes, moves the feature to Done when it merges, and verifies again when new commits arrive. Projects you already had keep merging locally; change it on the project page.",
       "Paseo now names the branches of Foundry's workspaces (for example shout-mode or sht-1) instead of Foundry's own foundry/... names.",
     ],
   },

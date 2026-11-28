@@ -44,6 +44,7 @@ function Home({ projectKey }: { projectKey?: string }) {
       <Row wrap>
         <Btn label={proposedCards ? `Project manager (${proposedCards} card${proposedCards === 1 ? "" : "s"})` : "Project manager"} onPress={() => go(SCREEN.chat, { project: project.key })} />
       </Row>
+      <ShipMode project={project} />
       <WhatsNew ob={s.onboarding} />
       <Setup setup={s.setup} />
       <NewFeature projectKey={project.key} />
@@ -63,6 +64,24 @@ function Home({ projectKey }: { projectKey?: string }) {
         </Section>
       ) : null}
     </Page>
+  );
+}
+
+/** How this project ships a finished feature. */
+function ShipMode({ project }: { project: any }) {
+  const act = useAct();
+  return (
+    <Row wrap>
+      <T muted size={13}>Ship features by:</T>
+      <Choice
+        value={project.ship_mode}
+        onChange={(mode) => void act.run("project.set_ship_mode", { id: project.id, mode })}
+        options={[
+          { value: "pr", label: "GitHub pull request (gh, when the repo has a remote)" },
+          { value: "local_merge", label: "Local merge into base" },
+        ]}
+      />
+    </Row>
   );
 }
 
@@ -432,7 +451,8 @@ function ProjectCard({ projectRef, s }: { projectRef: ProjectRef; s: State }) {
         <>
           <T size={13}>
             Foundry's agents will work in this repo in their own Paseo workspaces: one per feature, one per task, and one for the project
-            manager. Foundry never pushes, and never merges into your base branch without your OK.
+            manager. Foundry pushes only when you ship a feature: it opens a GitHub PR when the repo has a remote, and it never merges into
+            your base branch without your OK.
           </T>
           <Row wrap>
             <Btn label={act.pending ? "Setting up…" : "Start using Foundry here"} kind="primary" disabled={act.pending} onPress={() => void adopt()} />

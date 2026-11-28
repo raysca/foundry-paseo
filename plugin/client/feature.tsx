@@ -1,7 +1,7 @@
 // One feature: Clarify answers, the spec, plan and task list with SHA-bound approvals, a spec change and
 // its change set, the feature's tasks, then Verify and Ship.
 import type { PluginScreenProps } from "@getpaseo/plugin/client";
-import { useRpc } from "@getpaseo/plugin/client";
+import { openExternalUrl, useRpc } from "@getpaseo/plugin/client";
 import { Loading, Markdown, ScrollView, useToast } from "@getpaseo/plugin/client/ui";
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
@@ -485,6 +485,8 @@ function Delivery({ s, f }: { s: State; f: any }) {
   const toast = useToast();
   const v = s.verifications.find((x) => x.feature_id === f.id);
   const ship = parseJson<any>(s.ships.find((x) => x.key === `ship:${f.id}`)?.value, null);
+  const project = s.projects.find((x) => x.id === f.project_id);
+  const prEvent = [...s.events].reverse().find((e) => e.feature_id === f.id && ["pr_closed", "pr_merged", "pr_new_commits"].includes(e.kind));
   const [needConfirm, setNeedConfirm] = useState<string | null>(null);
   const [form, setForm] = useState<{ title: string; description: string; refs: string } | null>(null);
   if (!["build", "verify", "ship", "done"].includes(f.stage) && !v) return null;
@@ -521,8 +523,8 @@ function Delivery({ s, f }: { s: State; f: any }) {
       <Row wrap>
         {f.stage === "verify" && v?.status === "failed" ? <Btn label="Ship with the gaps" onPress={() => void act.run("feature.ship_with_gaps", { id: f.id })} /> : null}
         {f.stage === "verify" && v?.status === "failed" ? <Btn label="Turn a failure into a task" onPress={() => setForm({ title: "", description: "", refs: reqs.filter((r) => !r.passed).map((r) => r.requirement_ref).join(", ") })} /> : null}
-        {f.stage === "verify" && v?.status !== "running" ? <Btn label="Run Verify again" onPress={() => void act.run("feature.verify", { id: f.id, force: true })} /> : null}
-        {f.stage === "ship" && !ship ? <Btn label="Prepare the ship" kind="primary" onPress={() => void act.run("feature.prepare_ship", { id: f.id })} /> : null}
+        {(f.stage === "verify" || (f.stage === "ship" && !ship?.pr)) && v?.status !== "running" ? <Btn label="Run Verify again" onPress={() => void act.run("feature.verify", { id: f.id, force: true })} /> : null}
+        {f.stage === "ship" && !ship ? <Btn label={project?.ship_mode === "pr" ? "Prepare the ship (opens a PR when the repo has a remote)" : "Prepare the ship"} kind="primary" disabled={act.pending} onPress={() => void act.run("feature.prepare_ship", { id: f.id })} /> : null}
       </Row>
       {form ? (
         <Card>
@@ -544,7 +546,18 @@ function Delivery({ s, f }: { s: State; f: any }) {
           </Row>
         </Card>
       ) : null}
-      {f.stage === "ship" && ship ? (
+      {f.stage === "ship" && ship?.pr ? (
+        <Card>
+          <T bold>Ship by pull request</T>
+          <T size={13}>PR #{ship.pr.number} from {f.branch} at {short(ship.sha)} is open. Merge it on GitHub; Foundry checks it every 5 minutes and moves the feature to Done when it merges. New commits on the branch send it back to Verify.</T>
+          <Row wrap>
+            <Btn label={`Open PR #${ship.pr.number}`} kind="primary" onPress={() => void openExternalUrl(ship.pr.url)} />
+            <Btn label="Check the PR now" disabled={act.pending} onPress={() => void act.run("feature.refresh_pr", { id: f.id })} />
+          </Row>
+        </Card>
+      ) : null}
+      {f.stage === "ship" && !ship && prEvent?.kind === "pr_closed" ? <T size={13}>⚠ The PR was closed without merging. Prepare the ship again to open a new one.</T> : null}
+      {f.stage === "ship" && ship && !ship.pr ? (
         <Card>
           <T bold>Ship by local merge</T>
           <T size={13}>Merges {f.branch} at {short(ship.sha)} into the project's base branch.</T>
@@ -555,7 +568,7 @@ function Delivery({ s, f }: { s: State; f: any }) {
           </Row>
         </Card>
       ) : null}
-      {f.stage === "done" ? <T>Shipped.</T> : null}
+      {f.stage === "done" ? <T>{prEvent?.kind === "pr_merged" ? "Shipped: the PR was merged on GitHub." : "Shipped."}</T> : null}
     </Section>
   );
 }
