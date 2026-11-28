@@ -113,7 +113,7 @@ export default function contribute(server: PluginServerContext) {
       proposals: store.all("SELECT * FROM task_proposals WHERE status IN ('proposed','approved') ORDER BY id DESC LIMIT 50"),
       slices: store.all("SELECT * FROM slices ORDER BY feature_id, n"),
       questions: store.all("SELECT * FROM questions WHERE status IN ('live','waiting') ORDER BY id"),
-      verifications: store.all("SELECT * FROM verifications WHERE id IN (SELECT MAX(id) FROM verifications GROUP BY feature_id)"),
+      verifications: store.all("SELECT * FROM verifications WHERE id IN (SELECT MAX(id) FROM verifications GROUP BY feature_id, COALESCE(slice_id, 0)) ORDER BY id DESC"),
       chat: store.all("SELECT * FROM (SELECT * FROM chat ORDER BY id DESC LIMIT 300) ORDER BY id"),
       cards: store.all("SELECT * FROM cards ORDER BY id DESC LIMIT 100"),
       pm_threads: store.all("SELECT project_id, thread, busy, last_turn_at FROM pm_threads"),
@@ -249,19 +249,19 @@ export default function contribute(server: PluginServerContext) {
         case "feature.cancel":
           return foundry.planning.setStatus(Number(args.id), "cancelled");
         case "feature.verify":
-          return foundry.delivery.verify(Number(args.id), "you", args.force === true);
+          return foundry.delivery.verify(Number(args.id), "you", args.force === true, args.slice ? Number(args.slice) : null);
         case "feature.ship_with_gaps":
-          return foundry.delivery.shipWithGaps(Number(args.id));
+          return foundry.delivery.shipWithGaps(Number(args.id), "you", args.slice ? Number(args.slice) : null);
         case "feature.task_from_failure":
-          return foundry.delivery.taskFromFailure(Number(args.id), String(args.title ?? ""), String(args.description ?? ""), Array.isArray(args.requirement_refs) ? args.requirement_refs.map(String) : []);
+          return foundry.delivery.taskFromFailure(Number(args.id), String(args.title ?? ""), String(args.description ?? ""), Array.isArray(args.requirement_refs) ? args.requirement_refs.map(String) : [], "you", args.slice ? Number(args.slice) : null);
         case "feature.refresh_pr":
           return { results: await foundry.delivery.refreshPrs(Number(args.id), "you") };
         case "project.set_ship_mode":
           return store.setShipMode(Number(args.id ?? store.projectByKey(String(args.project))?.id), args.mode);
         case "feature.prepare_ship":
-          return foundry.delivery.prepare(Number(args.id));
+          return foundry.delivery.prepare(Number(args.id), "you", args.slice ? Number(args.slice) : null);
         case "feature.accept_ship":
-          return foundry.delivery.acceptShip(Number(args.id), String(args.head_sha), String(args.tree_sha), { confirmCheckedOut: args.confirm === true });
+          return foundry.delivery.acceptShip(Number(args.id), String(args.head_sha), String(args.tree_sha), { confirmCheckedOut: args.confirm === true, slice: args.slice ? Number(args.slice) : null });
         case "pm.send": {
           const p = typeof args.project === "string" && isNaN(Number(args.project)) ? store.projectByKey(args.project) : store.project(Number(args.project));
           if (!p) throw new FoundryError("NOT_FOUND", `No project ${args.project}`);

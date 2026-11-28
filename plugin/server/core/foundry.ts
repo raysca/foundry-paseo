@@ -148,6 +148,7 @@ export class Foundry {
     const ids = new Set<string>();
     const add = (rows: { id: string | null }[]) => rows.forEach((r) => r.id && ids.add(r.id));
     add(this.store.all("SELECT integration_workspace_id id FROM features"));
+    add(this.store.all("SELECT workspace_id id FROM slices"));
     add(this.store.all("SELECT workspace_id id FROM attempts UNION SELECT check_workspace_id FROM attempts"));
     add(this.store.all("SELECT workspace_id id FROM agents"));
     add(this.store.all("SELECT workspace_id id FROM verifications"));
