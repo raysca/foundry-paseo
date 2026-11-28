@@ -33,6 +33,49 @@ export async function ensureIntegration(store: Store, host: Host, featureId: num
 }
 
 /**
+ * Reopen a Done feature for a spec change. Its shipped work is already in base, so a new feature branch
+ * is cut from base (Paseo names it from `<slug>-r<round>`) in a new integration workspace. The old
+ * workspace stays until the change set is approved (discarding the change goes back to it). Base must hold the shipped docs: after a PR merge on GitHub Foundry looks at
+ * the remote's base too, and refuses with BASE_BEHIND when neither has them.
+ */
+export async function reopenOnBase(store: Store, host: Host, featureId: number, firstRemote: (repo: string) => Promise<string | null>): Promise<{ feature: Feature; previous: Reopened }> {
+  const f = store.feature(featureId)!;
+  const p = store.project(f.project_id)!;
+  const spec = `${featureDir(f.slug)}/spec.md`;
+  const has = (ref: string) => git(p.repo, "cat-file", "-e", `${ref}:${spec}`).then(() => true, () => false);
+  let from: string | null = (await has(p.base_ref)) ? p.base_ref : null;
+  if (!from) {
+    const remote = await firstRemote(p.repo);
+    if (remote) {
+      await git(p.repo, "fetch", "-q", remote, p.base_ref).catch(() => "");
+      if (await has(`${remote}/${p.base_ref}`)) from = `${remote}/${p.base_ref}`;
+    }
+  }
+  if (!from) throw new FoundryError("BASE_BEHIND", `${p.base_ref} does not have this feature's shipped docs yet. Pull ${p.base_ref}, then edit again.`, { base: p.base_ref });
+  const round = (f.round ?? 1) + 1;
+  const ws = await host.createWorktreeWorkspace({ repo: p.repo, title: `Foundry: ${f.title} (round ${round})`, slug: `${f.slug}-r${round}`, from, purpose: "integration", visible: false });
+  store.recordBranch(p.repo, ws.branch, "feature");
+  const sha = await head(ws.path);
+  const previous: Reopened = { round: f.round ?? 1, branch: f.branch, workspace_id: f.integration_workspace_id, path: f.integration_path, head_sha: f.head_sha, planner_agent_id: f.planner_agent_id };
+  store.tx(() => {
+    // A new planner session starts in the new workspace; the old one stays with the old branch.
+    store.updateFeature(f.id, { branch: ws.branch, integration_workspace_id: ws.workspaceId, integration_path: ws.path, head_sha: sha, round, planner_agent_id: null });
+    store.event("feature_reopened", { actor: "you", project: f.project_id, feature: f.id, detail: { round, branch: ws.branch, from, previous_branch: f.branch } });
+  });
+  return { feature: store.feature(f.id)!, previous };
+}
+
+/** Where a reopened feature was before: kept with its spec change so a discard can go back to Done. */
+export interface Reopened {
+  round: number;
+  branch: string;
+  workspace_id: string | null;
+  path: string | null;
+  head_sha: string | null;
+  planner_agent_id: string | null;
+}
+
+/**
  * The integration worktree must be exactly what Foundry left: clean, at the head Foundry recorded.
  * A merge made outside Foundry (Paseo's "Merge locally" has no plugin hook) is caught here.
  */

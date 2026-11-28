@@ -9,6 +9,15 @@ export interface Change {
 
 export const CHANGES: Change[] = [
   {
+    version: "0.4.0",
+    notes: [
+      "Ship by GitHub pull request: Prepare pushes the feature branch and opens a PR with gh when the repo has a remote. Foundry checks the PR every 5 minutes, moves the feature to Done when it merges, and verifies again when new commits arrive. Projects you already had keep merging locally; change it on the project page.",
+      "Edit the spec of a feature in Verify, Ship or Done. In Verify or Ship, approving the change set sends the feature back to Build when tasks changed, or straight to Verify. A Done feature reopens on a new branch from base (shout-mode-r2), and only what changed becomes new tasks.",
+      "A task the spec changed under is flagged at review: accept it as is, rework it with a drafted message naming the new requirements, or cancel it.",
+      "Filter the features list by bucket, status and spec changed.",
+    ],
+  },
+  {
     version: "0.3.0",
     notes: [
       "Quick flow: pick it when you create a feature, and the project manager writes the spec, plan and task list in one turn. You approve all three at once.",

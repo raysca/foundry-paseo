@@ -1,7 +1,7 @@
 // One feature: Clarify answers, the spec, plan and task list with SHA-bound approvals, a spec change and
 // its change set, the feature's tasks, then Verify and Ship.
 import type { PluginScreenProps } from "@getpaseo/plugin/client";
-import { useRpc } from "@getpaseo/plugin/client";
+import { openExternalUrl, useRpc } from "@getpaseo/plugin/client";
 import { Loading, Markdown, ScrollView, useToast } from "@getpaseo/plugin/client/ui";
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
@@ -54,6 +54,8 @@ function Header({ s, f, row, projectKey }: { s: State; f: any; row: any; project
         <T bold size={18}>{f.title}</T>
         <Badge label={STAGE_NAME[f.stage] ?? f.stage} tone="info" />
         {f.flow === "quick" ? <Badge label="quick flow" tone="muted" /> : null}
+        {f.round > 1 ? <Badge label={`reopened · round ${f.round}`} tone="muted" /> : null}
+        {f.spec_change_open ? <Badge label="spec changed" tone="warning" /> : null}
         {f.status !== "active" ? <Badge label={f.status} tone="warning" /> : null}
         {f.planning_busy ? <Badge label="project manager is working" tone="info" /> : null}
       </Row>
@@ -193,7 +195,7 @@ function DocView({ s, f, kind }: { s: State; f: any; kind: DocKind }) {
             />
             <Btn label="Cancel" onPress={() => setMode("read")} />
           </Row>
-          <T muted size={12}>Editing an approved spec opens a spec change: the plan and tasks go stale until you approve a change set.</T>
+          <T muted size={12}>{EDIT_NOTE[f.stage] ?? "Editing an approved spec opens a spec change: the plan and tasks go stale until you approve a change set."}</T>
         </>
       ) : !data ? (
         <Loading />
@@ -251,7 +253,7 @@ function DocView({ s, f, kind }: { s: State; f: any; kind: DocKind }) {
           {d.status === "in_review" ? <Btn label="Request a revision" onPress={() => setMode("revise")} /> : null}
           {data ? <Btn label={saved.length ? `Comment on lines (${saved.length} not sent yet)` : "Comment on lines"} onPress={() => setMode("comment")} /> : null}
           <Btn label="Revisions" onPress={() => setMode("history")} />
-          {kind !== "tasks" && data ? (
+          {data && f.status !== "cancelled" && (kind === "spec" || (kind === "plan" && ["plan", "tasks"].includes(f.stage))) ? (
             <Btn
               label="Edit"
               onPress={() => {
@@ -274,6 +276,13 @@ function DocView({ s, f, kind }: { s: State; f: any; kind: DocKind }) {
 }
 
 /** The doc as numbered lines: tap a line to comment on it. Comments are saved, not sent, until a revision request takes them. */
+/** What saving an edit does, by stage. */
+const EDIT_NOTE: Record<string, string> = {
+  verify: "Saving opens a spec change. Verify waits until you approve its change set; then the feature goes back to Build if tasks changed, else straight to Verify.",
+  ship: "Saving opens a spec change. Prepare and Accept wait until you approve its change set; an open PR stays open and gets the new commits.",
+  done: "This feature has shipped. Saving reopens it: a new branch is cut from base, the feature goes back to Spec, and only what changed becomes new tasks. Discarding the change puts it back to Done.",
+};
+
 function DocLines({ f, kind, sha, text, comments }: { f: any; kind: DocKind; sha: string; text: string; comments: any[] }) {
   const c = useColors();
   const act = useAct();
@@ -485,6 +494,8 @@ function Delivery({ s, f }: { s: State; f: any }) {
   const toast = useToast();
   const v = s.verifications.find((x) => x.feature_id === f.id);
   const ship = parseJson<any>(s.ships.find((x) => x.key === `ship:${f.id}`)?.value, null);
+  const project = s.projects.find((x) => x.id === f.project_id);
+  const prEvent = [...s.events].reverse().find((e) => e.feature_id === f.id && ["pr_closed", "pr_merged", "pr_new_commits"].includes(e.kind));
   const [needConfirm, setNeedConfirm] = useState<string | null>(null);
   const [form, setForm] = useState<{ title: string; description: string; refs: string } | null>(null);
   if (!["build", "verify", "ship", "done"].includes(f.stage) && !v) return null;
@@ -519,10 +530,11 @@ function Delivery({ s, f }: { s: State; f: any }) {
         <T muted>Verify runs when every task is Done.</T>
       )}
       <Row wrap>
-        {f.stage === "verify" && v?.status === "failed" ? <Btn label="Ship with the gaps" onPress={() => void act.run("feature.ship_with_gaps", { id: f.id })} /> : null}
-        {f.stage === "verify" && v?.status === "failed" ? <Btn label="Turn a failure into a task" onPress={() => setForm({ title: "", description: "", refs: reqs.filter((r) => !r.passed).map((r) => r.requirement_ref).join(", ") })} /> : null}
-        {f.stage === "verify" && v?.status !== "running" ? <Btn label="Run Verify again" onPress={() => void act.run("feature.verify", { id: f.id, force: true })} /> : null}
-        {f.stage === "ship" && !ship ? <Btn label="Prepare the ship" kind="primary" onPress={() => void act.run("feature.prepare_ship", { id: f.id })} /> : null}
+        {f.spec_change_open ? <T muted size={13}>The spec changed: Verify and Ship wait for its change set.</T> : null}
+        {f.stage === "verify" && v?.status === "failed" && !f.spec_change_open ? <Btn label="Ship with the gaps" onPress={() => void act.run("feature.ship_with_gaps", { id: f.id })} /> : null}
+        {f.stage === "verify" && v?.status === "failed" && !f.spec_change_open ? <Btn label="Turn a failure into a task" onPress={() => setForm({ title: "", description: "", refs: reqs.filter((r) => !r.passed).map((r) => r.requirement_ref).join(", ") })} /> : null}
+        {(f.stage === "verify" || (f.stage === "ship" && !ship?.pr)) && v?.status !== "running" && !f.spec_change_open ? <Btn label="Run Verify again" onPress={() => void act.run("feature.verify", { id: f.id, force: true })} /> : null}
+        {f.stage === "ship" && !ship && !f.spec_change_open ? <Btn label={project?.ship_mode === "pr" ? "Prepare the ship (opens a PR when the repo has a remote)" : "Prepare the ship"} kind="primary" disabled={act.pending} onPress={() => void act.run("feature.prepare_ship", { id: f.id })} /> : null}
       </Row>
       {form ? (
         <Card>
@@ -544,7 +556,18 @@ function Delivery({ s, f }: { s: State; f: any }) {
           </Row>
         </Card>
       ) : null}
-      {f.stage === "ship" && ship ? (
+      {f.stage === "ship" && ship?.pr ? (
+        <Card>
+          <T bold>Ship by pull request</T>
+          <T size={13}>PR #{ship.pr.number} from {f.branch} at {short(ship.sha)} is open. Merge it on GitHub; Foundry checks it every 5 minutes and moves the feature to Done when it merges. New commits on the branch send it back to Verify.</T>
+          <Row wrap>
+            <Btn label={`Open PR #${ship.pr.number}`} kind="primary" onPress={() => void openExternalUrl(ship.pr.url)} />
+            <Btn label="Check the PR now" disabled={act.pending} onPress={() => void act.run("feature.refresh_pr", { id: f.id })} />
+          </Row>
+        </Card>
+      ) : null}
+      {f.stage === "ship" && !ship && prEvent?.kind === "pr_closed" ? <T size={13}>⚠ The PR was closed without merging. Prepare the ship again to open a new one.</T> : null}
+      {f.stage === "ship" && ship && !ship.pr ? (
         <Card>
           <T bold>Ship by local merge</T>
           <T size={13}>Merges {f.branch} at {short(ship.sha)} into the project's base branch.</T>
@@ -555,7 +578,7 @@ function Delivery({ s, f }: { s: State; f: any }) {
           </Row>
         </Card>
       ) : null}
-      {f.stage === "done" ? <T>Shipped.</T> : null}
+      {f.stage === "done" ? <T>{prEvent?.kind === "pr_merged" ? "Shipped: the PR was merged on GitHub." : "Shipped."}</T> : null}
     </Section>
   );
 }

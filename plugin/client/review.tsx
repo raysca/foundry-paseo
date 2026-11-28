@@ -64,7 +64,8 @@ function Issue({ issueKey, openAgent }: { issueKey: string; openAgent?: (agentId
         ) : null}
       </Card>
       <Questions questions={(r?.questions ?? []).filter((x: any) => x.status === "live" || x.status === "waiting")} />
-      {i.status === "In_Review" && r ? <Decide issueKey={i.key} head={r.head_sha} tree={r.tree_sha} /> : null}
+      {i.status === "In_Review" && r ? <Decide issueKey={i.key} head={r.head_sha} tree={r.tree_sha} flagged={i.flag === "SPEC_CHANGED"} /> : null}
+      {i.status === "Done" && i.flag === "SPEC_CHANGED" ? <T muted size={13}>Accepted as is after the spec changed: the requirements it covers stay not covered until another task covers them, and Verify reports them.</T> : null}
       {i.status === "Failed" || i.status === "Blocked" ? <Retry issueKey={i.key} projectKey={p.key} /> : null}
       {r ? <Verdicts events={r.events} /> : null}
       {r ? <Runs runs={r.runs} /> : null}
@@ -96,17 +97,31 @@ function Questions({ questions }: { questions: any[] }) {
   );
 }
 
-function Decide({ issueKey, head, tree }: { issueKey: string; head: string | null; tree: string | null }) {
+function Decide({ issueKey, head, tree, flagged }: { issueKey: string; head: string | null; tree: string | null; flagged: boolean }) {
   const act = useAct();
+  const action = useRpc(actionRpc);
   const [feedback, setFeedback] = useState("");
   if (!head || !tree) return null;
+  const draft = async () => {
+    const r = (await action({ action: "issue.flag_draft", args: { key: issueKey } })) as any;
+    if (r?.feedback) setFeedback(r.feedback);
+  };
   return (
     <Card>
       <T bold>Your review</T>
+      {flagged ? (
+        <>
+          <T size={13}>⚠ The spec changed while this task ran. Accept it as is (the requirements it covers stay not covered, and Verify reports them), rework it against the new requirements, or cancel it.</T>
+          <Row wrap>
+            <Btn label="Draft the rework for the new requirements" onPress={() => void draft()} />
+            <Btn label="Cancel this task" kind="danger" disabled={act.pending} onPress={() => void act.run("issue.cancel_flagged", { key: issueKey, head_sha: head, tree_sha: tree })} />
+          </Row>
+        </>
+      ) : null}
       <T muted size={13}>Accept merges this task into the feature branch at {short(head)}. If it moved since this page loaded, Foundry refuses and shows the new head.</T>
       <Field value={feedback} onChange={setFeedback} placeholder="Feedback (needed for rework, optional for accept)" multiline />
       <Row wrap>
-        <Btn label={`Accept ${short(head)}`} kind="primary" disabled={act.pending} onPress={() => void act.run("issue.accept", { key: issueKey, head_sha: head, tree_sha: tree, feedback })} />
+        <Btn label={flagged ? `Accept ${short(head)} as is` : `Accept ${short(head)}`} kind="primary" disabled={act.pending} onPress={() => void act.run("issue.accept", { key: issueKey, head_sha: head, tree_sha: tree, feedback })} />
         <Btn label="Send back for rework" disabled={!feedback.trim() || act.pending} onPress={async () => (await act.run("issue.rework", { key: issueKey, head_sha: head, tree_sha: tree, feedback })) && setFeedback("")} />
       </Row>
     </Card>

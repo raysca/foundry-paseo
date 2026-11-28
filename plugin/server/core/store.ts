@@ -34,8 +34,13 @@ export interface Project {
   base_ref: string;
   default_loop: string | null;
   next_issue_n: number;
+  ship_mode: ShipMode;
   created_at: string;
 }
+
+/** pr: push the feature branch and open a GitHub PR with gh (a local merge when the repo has no remote). */
+export type ShipMode = "pr" | "local_merge";
+export const SHIP_MODES: readonly ShipMode[] = ["pr", "local_merge"];
 
 export interface Feature {
   id: number;
@@ -58,6 +63,8 @@ export interface Feature {
   clarify_rounds: number;
   /** Why the PM's last planning turn failed, until a turn succeeds. */
   planning_error: string | null;
+  /** 1 for the first delivery; a reopened Done feature is on round 2, 3, ... (its branch gets -r<round>). */
+  round: number;
   created_at: string;
   updated_at: string;
 }
@@ -403,6 +410,12 @@ export const MIGRATIONS: readonly string[] = [
    CREATE INDEX doc_comments_feature ON doc_comments(feature_id, doc);`,
   // 10: resolving a comment (status 'resolved', and when)
   `ALTER TABLE doc_comments ADD COLUMN resolved_at TEXT;`,
+  // 11: how a project ships a feature. New projects open a GitHub PR when the repo has a remote; projects
+  // that already existed keep merging locally, as they did before.
+  `ALTER TABLE projects ADD COLUMN ship_mode TEXT NOT NULL DEFAULT 'pr';
+   UPDATE projects SET ship_mode='local_merge';`,
+  // 12: which delivery a feature is on. A Done feature whose spec you edit reopens on a new branch (round 2, 3, ...).
+  `ALTER TABLE features ADD COLUMN round INTEGER NOT NULL DEFAULT 1;`,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
@@ -640,6 +653,14 @@ export class Store {
   }
   project(id: number) {
     return this.get<Project>("SELECT * FROM projects WHERE id=?", id);
+  }
+  setShipMode(id: number, mode: ShipMode, actor: Actor = "you") {
+    if (!SHIP_MODES.includes(mode)) throw new FoundryError("INVALID_SHIP_MODE", `Ship mode is ${SHIP_MODES.join(" or ")}`);
+    const p = this.project(id);
+    if (!p) throw new FoundryError("NOT_FOUND", `No project ${id}`);
+    this.run("UPDATE projects SET ship_mode=? WHERE id=?", mode, id);
+    this.event("project_ship_mode", { actor, project: id, detail: { from: p.ship_mode, to: mode } });
+    return this.project(id)!;
   }
   projectByKey(key: string) {
     return this.get<Project>("SELECT * FROM projects WHERE key=?", key);

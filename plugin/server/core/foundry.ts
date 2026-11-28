@@ -21,6 +21,8 @@ export interface FoundryConfig {
   loop: () => LoopSettings & { planningTimeoutMs?: number };
   /** How often the scheduler looks for Ready work, in ms. 0 turns the timer off (tests). */
   tickMs?: number;
+  /** How often open Ship PRs are checked on GitHub (default 5 minutes). */
+  prPollMs?: number;
 }
 
 export class Foundry {
@@ -31,6 +33,7 @@ export class Foundry {
   readonly delivery: Delivery;
   readonly pm: ProjectManager;
   private lastTriage = 0;
+  private lastPrCheck = 0;
   private timer: NodeJS.Timeout | null = null;
 
   constructor(
@@ -90,6 +93,10 @@ export class Foundry {
   async tick() {
     await this.tasks.tick();
     await this.delivery.checkBuildDone();
+    if (Date.now() - this.lastPrCheck >= (this.cfg.prPollMs ?? 5 * 60_000)) {
+      this.lastPrCheck = Date.now();
+      await this.delivery.refreshPrs();
+    }
     if (Date.now() - this.lastTriage >= 30_000) {
       this.lastTriage = Date.now();
       await this.pm.triage();

@@ -124,7 +124,7 @@ const log = (...a) => console.log(`[${new Date().toISOString().slice(11, 19)}]`,
     await see("Ship with the gaps", 240000);
     await shot("verify");
     await press("Ship with the gaps");
-    await press("Prepare the ship");
+    await press(/^Prepare the ship/, false);
     await see("Ship by local merge");
   });
 

@@ -1,0 +1,18 @@
+#!/usr/bin/env node
+// A stand-in for the gh CLI in the e2e suite (and the unit tests): pr create records a PR in the JSON file
+// at FAKE_GH_STATE; pr view reports it, with headRefOid read from the bare remote at FAKE_GH_REMOTE.
+const fs = require("fs"); const { execFileSync } = require("child_process");
+const file = process.env.FAKE_GH_STATE; const st = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : { prs: [] };
+const a = process.argv.slice(2); const opt = (k) => a[a.indexOf(k) + 1];
+const headOf = (pr) => execFileSync("git", ["rev-parse", "refs/heads/" + pr.head], { cwd: process.env.FAKE_GH_REMOTE }).toString().trim();
+if (a[0] === "pr" && a[1] === "create") {
+  if (st.fail) { console.error(st.fail); process.exit(1); }
+  const n = st.prs.length + 1; const pr = { number: n, url: "https://github.com/acme/shout/pull/" + n, state: "OPEN", head: opt("--head"), base: opt("--base"), title: opt("--title"), body: opt("--body") };
+  st.prs.push(pr); fs.writeFileSync(file, JSON.stringify(st)); console.log(pr.url); process.exit(0);
+}
+if (a[0] === "pr" && a[1] === "view") {
+  const ref = a[2]; const pr = st.prs.filter((p) => String(p.number) === ref || p.url === ref || p.head === ref).pop();
+  if (!pr) { console.error("no pull requests found"); process.exit(1); }
+  console.log(JSON.stringify({ number: pr.number, url: pr.url, state: pr.state, headRefOid: headOf(pr) })); process.exit(0);
+}
+console.error("fake gh: unsupported " + a.join(" ")); process.exit(2);

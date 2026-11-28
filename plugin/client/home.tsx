@@ -28,6 +28,9 @@ const BUCKETS = [
 
 function Home({ projectKey }: { projectKey?: string }) {
   const q = useFoundry();
+  const [bucket, setBucket] = useState<"all" | (typeof BUCKETS)[number][0]>("all");
+  const [status, setStatus] = useState<"active" | "paused" | "cancelled" | "all">("active");
+  const [changedOnly, setChangedOnly] = useState(false);
   if (!q.data) return q.error ? <Page><T>Foundry isn't reachable: {String(q.error)}</T></Page> : <Loading />;
   const s = q.data;
   if (s.deleted) return <DataDeleted home={s.deleted} />;
@@ -35,8 +38,8 @@ function Home({ projectKey }: { projectKey?: string }) {
   const project = s.projects.find((p) => p.key === projectKey);
   if (!project) return <Page crumbs={[{ label: "Foundry", onPress: () => go(SCREEN.home) }]}><T>No Foundry project {projectKey}.</T></Page>;
   const rows = (s.overview.rows as any[]).filter((r) => r.project_id === project.id);
-  const live = rows.filter((r) => r.status === "active");
-  const other = rows.filter((r) => r.status !== "active");
+  const live = rows.filter((r) => (status === "all" ? true : r.status === status) && (!changedOnly || r.spec_changed));
+  const other = status === "active" && !changedOnly ? rows.filter((r) => r.status !== "active") : [];
   const proposedCards = s.cards.filter((c: any) => c.project_id === project.id && c.status === "proposed").length;
   return (
     <Page crumbs={[{ label: "Foundry", onPress: () => go(SCREEN.home) }, { label: project.name }]}>
@@ -44,10 +47,16 @@ function Home({ projectKey }: { projectKey?: string }) {
       <Row wrap>
         <Btn label={proposedCards ? `Project manager (${proposedCards} card${proposedCards === 1 ? "" : "s"})` : "Project manager"} onPress={() => go(SCREEN.chat, { project: project.key })} />
       </Row>
+      <ShipMode project={project} />
       <WhatsNew ob={s.onboarding} />
       <Setup setup={s.setup} />
       <NewFeature projectKey={project.key} />
-      {BUCKETS.map(([b, name]) => {
+      <Row wrap>
+        <Choice value={bucket} onChange={setBucket} options={[{ value: "all", label: "All" }, ...BUCKETS.map(([b, name]) => ({ value: b, label: name }))]} />
+        <Choice value={status} onChange={setStatus} options={[{ value: "active", label: "Active" }, { value: "paused", label: "Paused" }, { value: "cancelled", label: "Cancelled" }, { value: "all", label: "Any status" }]} />
+        <Choice value={changedOnly ? "changed" : "any"} onChange={(v) => setChangedOnly(v === "changed")} options={[{ value: "any", label: "Any spec" }, { value: "changed", label: "Spec changed" }]} />
+      </Row>
+      {BUCKETS.filter(([b]) => bucket === "all" || bucket === b).map(([b, name]) => {
         const list = live.filter((r) => r.bucket === b);
         return (
           <Section key={b} title={`${name} (${list.length})`}>
@@ -63,6 +72,24 @@ function Home({ projectKey }: { projectKey?: string }) {
         </Section>
       ) : null}
     </Page>
+  );
+}
+
+/** How this project ships a finished feature. */
+function ShipMode({ project }: { project: any }) {
+  const act = useAct();
+  return (
+    <Row wrap>
+      <T muted size={13}>Ship features by:</T>
+      <Choice
+        value={project.ship_mode}
+        onChange={(mode) => void act.run("project.set_ship_mode", { id: project.id, mode })}
+        options={[
+          { value: "pr", label: "GitHub pull request (gh, when the repo has a remote)" },
+          { value: "local_merge", label: "Local merge into base" },
+        ]}
+      />
+    </Row>
   );
 }
 
@@ -432,7 +459,8 @@ function ProjectCard({ projectRef, s }: { projectRef: ProjectRef; s: State }) {
         <>
           <T size={13}>
             Foundry's agents will work in this repo in their own Paseo workspaces: one per feature, one per task, and one for the project
-            manager. Foundry never pushes, and never merges into your base branch without your OK.
+            manager. Foundry pushes only when you ship a feature: it opens a GitHub PR when the repo has a remote, and it never merges into
+            your base branch without your OK.
           </T>
           <Row wrap>
             <Btn label={act.pending ? "Setting up…" : "Start using Foundry here"} kind="primary" disabled={act.pending} onPress={() => void adopt()} />

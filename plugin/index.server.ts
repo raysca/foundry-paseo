@@ -190,6 +190,13 @@ export default function contribute(server: PluginServerContext) {
           return foundry.accept(String(args.key), String(args.head_sha), String(args.tree_sha), "you", String(args.feedback ?? ""));
         case "issue.rework":
           return foundry.tasks.rework(String(args.key), String(args.head_sha), String(args.tree_sha), String(args.feedback ?? ""));
+        case "issue.flag_draft":
+          return foundry.tasks.flagDraft(String(args.key));
+        case "issue.cancel_flagged": {
+          const r = await foundry.tasks.cancelAtReview(String(args.key), String(args.head_sha), String(args.tree_sha));
+          await foundry.delivery.checkBuildDone();
+          return r;
+        }
         case "issue.review":
           return foundry.tasks.review(String(args.key));
         case "issue.followup":
@@ -244,6 +251,10 @@ export default function contribute(server: PluginServerContext) {
           return foundry.delivery.shipWithGaps(Number(args.id));
         case "feature.task_from_failure":
           return foundry.delivery.taskFromFailure(Number(args.id), String(args.title ?? ""), String(args.description ?? ""), Array.isArray(args.requirement_refs) ? args.requirement_refs.map(String) : []);
+        case "feature.refresh_pr":
+          return { results: await foundry.delivery.refreshPrs(Number(args.id), "you") };
+        case "project.set_ship_mode":
+          return store.setShipMode(Number(args.id ?? store.projectByKey(String(args.project))?.id), args.mode);
         case "feature.prepare_ship":
           return foundry.delivery.prepare(Number(args.id));
         case "feature.accept_ship":

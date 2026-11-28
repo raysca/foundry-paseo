@@ -124,7 +124,9 @@ test("Build ends, Verify passes on the merged head and the feature ships by loca
   await assert.rejects(foundry.delivery.acceptShip(fid, f.head_sha!, "x"), code("NOT_PREPARED"));
   const prep = await foundry.delivery.prepare(fid);
   assert.equal(prep.sha, f.head_sha);
-  await assert.rejects(foundry.delivery.verify(fid), code("SHIP_PREPARED"));
+  // Verify again from Ship (no PR open): an already verified head is skipped and the prepared merge stays.
+  assert.deepEqual(await foundry.delivery.verify(fid), { skipped: true, verification: v.id });
+  assert.ok(foundry.delivery.prepared(fid));
   await assert.rejects(foundry.delivery.acceptShip(fid, "0".repeat(40), prep.tree), code("STALE_REVIEW"));
 
   // main is checked out in the developer's own checkout: refused when dirty, then until confirmed.

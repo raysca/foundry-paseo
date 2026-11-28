@@ -1,7 +1,7 @@
 // Verify and Ship: close loop 1. Verify checks what would ship (base merged in, every task's checks on
 // a fresh check workspace at the merged head, a reviewer's per-requirement report) and never changes
-// code itself apart from merging base. Ship (local merge in M1) merges the feature into base at the SHA
-// you read, under the base-integration rule.
+// code itself apart from merging base. Ship opens a GitHub PR (pr mode, with a remote) and follows it,
+// or merges the feature into base at the SHA you read under the base-integration rule (local merge).
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdtempSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -12,6 +12,7 @@ import { changedPaths, FOUNDRY_IDENT, git, head, identEnv, sh, treeOf } from "./
 import type { Host } from "./host";
 import type { Locks } from "./locks";
 import { resolveLoop, type LoopStep } from "./loops";
+import { createPr, firstRemote, pushBranch, redact, viewPr, type PrInfo } from "./github";
 import { FoundryError, type Actor } from "./model";
 import { parse, type Feature, type Store } from "./store";
 
@@ -28,6 +29,14 @@ export interface Verification {
   reviewer_agent_id: string | null;
   created_at: string;
   ended_at: string | null;
+}
+
+/** The prepared ship, kept in settings as ship:<feature id> until it lands or is dropped. */
+export interface PreparedShip {
+  sha: string;
+  tree: string;
+  mode: "pr" | "local_merge";
+  pr?: { number: number; url: string; remote: string };
 }
 
 export interface RequirementResult {
@@ -76,7 +85,9 @@ export class Delivery {
     if (!f0) throw new FoundryError("NOT_FOUND", `No feature ${featureId}`);
     if (f0.status === "cancelled") throw new FoundryError("FEATURE_CLOSED", "This feature is cancelled");
     if (!["verify", "ship"].includes(f0.stage)) throw new FoundryError("WRONG_STAGE", `The feature is in ${f0.stage}; Verify runs once Build ends`);
-    if (f0.stage === "ship" && this.store.setting(`ship:${f0.id}`)) throw new FoundryError("SHIP_PREPARED", "Verify again after cancelling the prepared ship");
+    if (f0.spec_change_open) throw new FoundryError("SPEC_CHANGE_OPEN", "The spec changed: approve its change set or discard it first");
+    // From Ship, Verify runs again while no PR is open (for example when base moved on); a prepared local merge is dropped.
+    if (f0.stage === "ship" && this.prepared(f0.id)?.pr) throw new FoundryError("PR_OPEN", "A PR is open for this feature: merge or close it on GitHub first", { url: this.prepared(f0.id)!.pr!.url });
     const r = await this.locks.with(`feature:${featureId}`, async () => {
       const f = this.store.feature(featureId)!;
       const last = this.verification(f.id);
@@ -96,7 +107,10 @@ export class Delivery {
       const sha = await head(path);
       if (sha !== f.head_sha) this.store.updateFeature(f.id, { head_sha: sha });
       if (!force && last?.status === "passed" && last.head_sha === sha) return { skipped: true, verification: last.id } as const;
-      if (f.stage === "ship") this.store.setStage(f.id, "verify", actor);
+      if (f.stage === "ship") {
+        this.store.setSetting(`ship:${f.id}`, "");
+        this.store.setStage(f.id, "verify", actor);
+      }
       const id = this.newVerification(f, sha, "running", null);
       this.store.event("verify_started", { actor, project: f.project_id, feature: f.id, detail: { verification: id, head: sha } });
       return { verification: id, sha } as const;
@@ -280,27 +294,67 @@ export class Delivery {
     return { issue: key };
   }
 
-  // ---------- Ship (local merge) ----------
-  /** Prepare: records the ship SHA. A PR mode with gh arrives later; M1 ships by local merge. */
+  // ---------- Ship ----------
+  prepared(featureId: number) {
+    return parse<PreparedShip | null>(this.store.setting(`ship:${featureId}`), null);
+  }
+
+  /**
+   * Prepare: records the ship SHA. In pr mode with a remote it pushes the feature branch and opens a PR
+   * with gh; without a remote, or in local_merge, it prepares a local merge.
+   */
   async prepare(featureId: number, actor: Actor = "you") {
     return this.locks.with(`feature:${featureId}`, async () => {
       const f = this.store.feature(featureId)!;
       if (f.stage !== "ship" || f.status !== "active") throw new FoundryError("WRONG_STAGE", "Prepare runs in Ship on an active feature");
+    if (f.spec_change_open) throw new FoundryError("SPEC_CHANGE_OPEN", "The spec changed: approve its change set or discard it first");
+      const before = this.prepared(f.id);
+      if (before?.pr) throw new FoundryError("PR_OPEN", "A PR is already open for this feature", { url: before.pr.url });
       await assertIntegrationUntouched(this.store, f);
+      const p = this.store.project(f.project_id)!;
       const sha = f.head_sha!;
       const tree = await treeOf(f.integration_path!, sha);
-      this.store.setSetting(`ship:${f.id}`, JSON.stringify({ sha, tree, mode: "local_merge" }));
-      this.store.event("ship_prepared", { actor, project: f.project_id, feature: f.id, detail: { sha, mode: "local_merge" } });
-      return { sha, tree, mode: "local_merge" };
+      const remote = p.ship_mode === "pr" ? await firstRemote(p.repo) : null;
+      let ship: PreparedShip = { sha, tree, mode: "local_merge" };
+      if (remote) {
+        await pushBranch(p.repo, remote, f.branch);
+        // A PR still open for the branch (new commits sent the feature back to Verify) carries the new head.
+        const open = await viewPr(p.repo, f.branch).catch(() => null);
+        const pr = open?.state === "OPEN" ? open : await createPr(p.repo, { base: p.base_ref, branch: f.branch, title: f.title, body: await this.prBody(f) });
+        ship = { sha, tree, mode: "pr", pr: { number: pr.number, url: pr.url, remote } };
+      }
+      this.store.setSetting(`ship:${f.id}`, JSON.stringify(ship));
+      this.store.event("ship_prepared", { actor, project: f.project_id, feature: f.id, detail: { sha, mode: ship.mode, pr: ship.pr?.url ?? null, why: !remote && p.ship_mode === "pr" ? "no remote" : undefined } });
+      return ship;
     });
+  }
+
+  /** The PR body: spec summary, requirement report and task list, with anything that looks like a secret blanked out. */
+  private async prBody(f: Feature) {
+    const spec = this.store.doc(f.id, "spec");
+    const text = spec?.approved_sha ? await git(f.integration_path!, "show", `${spec.approved_sha}:${featureDir(f.slug)}/spec.md`).catch(() => "") : "";
+    const goal = /## Goal\s*\n([\s\S]*?)(?=\n## |$)/.exec(text)?.[1]?.trim() ?? f.idea;
+    const v = this.verification(f.id);
+    const reqs = parse<RequirementResult[]>(v?.requirements ?? "[]", []);
+    const titles = new Map(this.store.requirements(f.id).map((r) => [r.ref, r.title]));
+    const issues = this.store.issues({ featureId: f.id });
+    const body = [
+      `## Summary\n\n${goal}`,
+      `## Requirements\n\n${reqs.length ? reqs.map((r) => `- ${r.passed ? "✅" : "❌"} **${r.requirement_ref}** ${titles.get(r.requirement_ref) ?? ""}: ${r.evidence}`).join("\n") : "_No requirement report._"}`,
+      `## Tasks\n\n${issues.map((i) => `- ${i.status === "Done" ? "[x]" : "[ ]"} ${i.key} ${i.title}${i.status === "Done" ? "" : ` (${i.status})`}`).join("\n") || "_None._"}`,
+      `---\n_Shipped by Foundry from \`${f.branch}\` at ${f.head_sha?.slice(0, 10)}. Spec, plan and tasks are in \`${featureDir(f.slug)}/\`._`,
+    ].join("\n\n");
+    return redact(body);
   }
 
   /** Accept the prepared ship at the head and tree you read: merge the feature into base. */
   async acceptShip(featureId: number, headSha: string, treeSha: string, o: { confirmCheckedOut?: boolean } = {}, actor: Actor = "you") {
     return this.locks.with(`feature:${featureId}`, async () => {
       const f = this.store.feature(featureId)!;
-      const prepared = parse<{ sha: string; tree: string } | null>(this.store.setting(`ship:${f.id}`), null);
+      const prepared = this.prepared(f.id);
       if (f.stage !== "ship" || !prepared) throw new FoundryError("NOT_PREPARED", "Prepare the ship first");
+      if (f.spec_change_open) throw new FoundryError("SPEC_CHANGE_OPEN", "The spec changed: approve its change set or discard it first");
+      if (prepared.pr) throw new FoundryError("PR_OPEN", "Merge the PR on GitHub; Foundry sees it at its next check", { url: prepared.pr.url });
       const dirty = await changedPaths(f.integration_path!);
       const cur = await head(f.integration_path!);
       if (dirty.length || cur !== headSha || headSha !== prepared.sha || (await treeOf(f.integration_path!, cur)) !== treeSha)
@@ -338,6 +392,77 @@ export class Delivery {
       });
       return { merged: mergedAt, pushed };
     });
+  }
+
+  /**
+   * Follow open PRs (every 5 minutes from the scheduler, and on Refresh). Merged moves the feature to
+   * Done; closed unmerged leaves it in Ship to prepare again; new commits on the feature branch after the
+   * PR opened send it back to Verify.
+   */
+  async refreshPrs(only?: number, actor: Actor = "system") {
+    const out: { feature: number; result: string }[] = [];
+    // While a spec change is open the PR is left alone: what it would merge is decided by the change set.
+    for (const f of this.store.features().filter((x) => x.stage === "ship" && !x.spec_change_open && (only === undefined || x.id === only))) {
+      const ship = this.prepared(f.id);
+      if (!ship?.pr) continue;
+      const p = this.store.project(f.project_id)!;
+      let pr: PrInfo;
+      try {
+        pr = await viewPr(p.repo, ship.pr.number);
+      } catch (e) {
+        this.store.event("pr_check_failed", { actor, project: f.project_id, feature: f.id, detail: { error: String(e instanceof Error ? e.message : e) } });
+        if (only !== undefined) throw e;
+        continue;
+      }
+      const result = await this.locks.with(`feature:${f.id}`, async () => {
+        const cur = this.store.feature(f.id)!;
+        if (cur.stage !== "ship") return "moved";
+        if (pr.state === "MERGED") {
+          this.store.tx(() => {
+            this.store.setSetting(`ship:${f.id}`, "");
+            this.store.setStage(f.id, "done", actor);
+            this.store.event("pr_merged", { actor, project: f.project_id, feature: f.id, detail: { url: pr.url, head: pr.headRefOid } });
+          });
+          return "merged";
+        }
+        if (pr.state === "CLOSED") {
+          this.store.tx(() => {
+            this.store.setSetting(`ship:${f.id}`, "");
+            this.store.event("pr_closed", { actor, project: f.project_id, feature: f.id, detail: { url: pr.url } });
+          });
+          void this.host.notify({ title: `${f.title}: the PR was closed without merging`, body: "Prepare the ship again to open a new one.", key: `pr-closed:${f.id}`, screen: "feature" });
+          return "closed";
+        }
+        const local = (await sh("git", ["rev-parse", f.branch], { cwd: p.repo })).stdout.trim();
+        if (pr.headRefOid !== ship.sha || (local && local !== ship.sha)) {
+          // New commits after the PR opened: what would ship is no longer what was verified.
+          this.store.tx(() => {
+            this.store.setSetting(`ship:${f.id}`, "");
+            this.store.setStage(f.id, "verify", actor);
+            this.store.event("pr_new_commits", { actor, project: f.project_id, feature: f.id, detail: { url: pr.url, prepared: ship.sha, pr_head: pr.headRefOid, local } });
+          });
+          return "reverify";
+        }
+        return "open";
+      });
+      if (result === "reverify") this.track(this.verifyAfterPr(f.id));
+      out.push({ feature: f.id, result });
+    }
+    return out;
+  }
+
+  /** New commits reached the PR's branch: bring the integration worktree to them, then verify again. */
+  private async verifyAfterPr(featureId: number) {
+    const f = this.store.feature(featureId)!;
+    const p = this.store.project(f.project_id)!;
+    const remote = await firstRemote(p.repo);
+    if (remote) {
+      // Someone pushed to the PR branch on GitHub: take their commits into the feature branch (fast-forward only).
+      await sh("git", ["fetch", "-q", remote, f.branch], { cwd: f.integration_path! });
+      const ff = await sh("git", ["merge", "--ff-only", "-q", "FETCH_HEAD"], { cwd: f.integration_path! });
+      if (ff.code === 0) this.store.updateFeature(f.id, { head_sha: await head(f.integration_path!) });
+    }
+    await this.verify(featureId, "system", true).catch((e) => this.store.event("verify_error", { feature: featureId, detail: { error: String(e) } }));
   }
 
   /** After a restart, a feature stuck in Verify is verified again. */
