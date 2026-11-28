@@ -82,6 +82,13 @@ export interface Host {
   /** Ask an agent to end its turn. */
   interrupt(agentId: string): Promise<void>;
   agentStatus(agentId: string): Promise<AgentStatus>;
+  /**
+   * A marker that changes whenever the agent does something (its timeline grows or changes). Foundry
+   * compares markers to tell a working agent from a silent one. Null when the host can't tell.
+   */
+  agentActivity(agentId: string): Promise<string | null>;
+  /** Stop an agent that didn't end its turn when interrupted. */
+  kill(agentId: string): Promise<void>;
   lastReply(agentId: string): Promise<string>;
 
   /** A worktree workspace on an existing branch (checkout) or a new one (branch-off from `from`). */

@@ -312,3 +312,17 @@ export function LoopPick({ projectId, value, onChange }: { projectId: number; va
     />
   );
 }
+
+/**
+ * What supervision is doing with a task: its agent waiting on a Paseo permission card (answer it in
+ * Paseo), or an automatic retry scheduled after a timeout or a failure.
+ */
+export function SupervisionBadges({ issue, attempt }: { issue: any; attempt?: any }) {
+  const out: ReactNode[] = [];
+  if (attempt && !attempt.ended_at && attempt.waiting === "permission") out.push(<Badge key="perm" label="waiting on permission in Paseo" tone="warning" />);
+  if (issue.retry_at) {
+    const at = new Date(issue.retry_at);
+    out.push(<Badge key="retry" label={`retry ${issue.retries + 1} at ${at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`} tone="info" />);
+  }
+  return out.length ? <>{out}</> : null;
+}

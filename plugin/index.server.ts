@@ -67,7 +67,15 @@ export default function contribute(server: PluginServerContext) {
   const adapter = new PaseoAdapter(server, paseo, store, adapterCfg);
   const foundry = new Foundry(store, adapter, {
     home,
-    loop: () => ({ maxFixRounds: settings.maxFixRounds, questionWindowMs: settings.questionWindowSeconds * 1000, checkTimeoutMs: 10 * 60_000 }),
+    loop: () => ({
+      maxFixRounds: settings.maxFixRounds,
+      questionWindowMs: settings.questionWindowSeconds * 1000,
+      checkTimeoutMs: 10 * 60_000,
+      idleTimeoutMs: settings.idleMinutes * 60_000,
+      turnTimeoutMs: settings.turnMinutes * 60_000,
+      maxRetries: settings.retries,
+      retryBackoffMs: settings.retryBackoffSeconds * 1000,
+    }),
   });
   let started = false;
   const attach = (p: PaseoApi, via: string) => {
@@ -121,6 +129,7 @@ export default function contribute(server: PluginServerContext) {
       holds: store.all("SELECT key, value FROM settings WHERE key LIKE 'slice_hold:%' AND value<>''"),
       events: store.events({ limit: 200 }),
       onboarding: install.status(),
+      autostart_paused: foundry.tasks.autostartPaused(),
       dev: devMode,
       safe_mode: null,
     })),
@@ -267,6 +276,8 @@ export default function contribute(server: PluginServerContext) {
           const mime = ext === "jpg" || ext === "jpeg" ? "image/jpeg" : `image/${ext}`;
           return { uri: `data:${mime};base64,${readFileSync(join(d.dir, file)).toString("base64")}` };
         }
+        case "autostart.resume":
+          return foundry.tasks.resumeAutostart("you");
         case "project.loops":
           return foundry.tasks.loops(Number(args.id ?? store.projectByKey(String(args.project))?.id));
         case "project.set_default_loop":

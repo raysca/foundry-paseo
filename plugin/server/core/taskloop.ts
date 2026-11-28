@@ -21,6 +21,38 @@ export interface LoopSettings {
   checkTimeoutMs: number;
   /** Where page checks leave their screenshots (Foundry's home in production); a temp folder if unset. */
   shotsDir?: string;
+  /** An agent turn with no activity this long is stopped (default 15 min). Paused while it waits on you. */
+  idleTimeoutMs?: number;
+  /** An agent turn running this long is stopped (default 60 min), not counting time it waits on you. */
+  turnTimeoutMs?: number;
+  /** Automatic retries after a timeout, an infrastructure error or a failed turn (default 2), then Blocked. */
+  maxRetries?: number;
+  /** The first retry's delay (default 1 min); each later one doubles it. */
+  retryBackoffMs?: number;
+  /** How often a turn's activity is read from the host (default 10 s). */
+  activityPollMs?: number;
+  /** How long an interrupted turn has to end before Foundry stops the agent (default 30 s). */
+  stopGraceMs?: number;
+  /** Infrastructure failures within breakerWindowMs that pause auto-start (default 3 in 10 min). */
+  breakerThreshold?: number;
+  breakerWindowMs?: number;
+}
+
+/** Failures worth an automatic retry: nothing about the task itself says it can't be done. */
+const RETRYABLE: ReasonCode[] = ["TIMEOUT", "INFRA_ERROR", "AGENT_ERROR"];
+const BREAKER_KEY = "autostart_paused";
+
+/** A turn under supervision, keyed by its run. Clocks live in memory: a restart gives running turns a fresh start. */
+interface Watched {
+  attemptId: number;
+  agentId: string;
+  startedAt: number;
+  lastActivity: number;
+  marker?: string | null;
+  polledAt?: number;
+  pausedMs: number;
+  pausedSince: number | null;
+  stopping?: { at: number; why: string };
 }
 
 /** How long a page step waits for its service to answer. */
@@ -40,6 +72,8 @@ const END_TURN_MESSAGE =
 export class TaskLoop {
   private liveQuestions = new Map<number, (answer: string | null) => void>();
   private verdicts = new Map<number, { role: "builder" | "reviewer"; v: VerdictInput }>();
+  private watched = new Map<number, Watched>();
+  private supervising = false;
   private ticking = false;
   private retick = false;
 
@@ -63,6 +97,8 @@ export class TaskLoop {
       do {
         this.retick = false;
         this.promoteBacklog();
+        if (this.autostartPaused()) continue;
+        await this.startDueRetries();
         for (const i of this.store.issues({ status: "Ready" })) {
           if (!this.mayAutoStart(i)) continue;
           if (this.unmetDeps(i.key).length) continue;
@@ -139,6 +175,8 @@ export class TaskLoop {
     if (!i) throw new FoundryError("NOT_FOUND", `No issue ${key}`);
     const waiting = this.unmetDeps(key);
     if (waiting.length) throw new FoundryError("DEPENDENCIES_NOT_DONE", `${key} waits for ${waiting.join(", ")}`, { waiting_for: waiting });
+    // You starting a task again gives it a fresh set of automatic retries.
+    if (actor !== "system" && (i.retries || i.retry_at)) this.store.updateIssue(key, { retries: 0, retry_at: null }, actor);
     if (i.status !== "Ready") {
       if (actor === "system") return;
       if (!["Backlog", "Failed", "Blocked"].includes(i.status)) throw new FoundryError("INVALID_TRANSITION", `Cannot start ${key} from ${i.status}`, { current: i.status });
@@ -244,6 +282,8 @@ export class TaskLoop {
       try {
         if (!tracked) return await this.recordUntracked(fresh, agentId, outcome.kind);
         if (fresh.ended_at) return;
+        const stopped = this.stoppedTurn(fresh, agentId);
+        if (stopped) return this.endStopped(fresh, stopped.why);
         if (agentId === fresh.reviewer_agent_id) return await this.afterReview(fresh, outcome);
         if (agentId === fresh.builder_agent_id && (fresh.step === "build" || fresh.step === "fix")) return await this.afterBuilderTurn(fresh, outcome);
       } catch (e) {
@@ -686,16 +726,167 @@ export class TaskLoop {
   private endAttempt(attemptId: number, outcome: AttemptOutcome, o: { issueStatus?: IssueStatus; reason?: ReasonCode; flag?: string; detail?: string }) {
     const a = this.store.attempt(attemptId)!;
     if (a.ended_at) return;
-    const issueStatus: IssueStatus = o.issueStatus ?? (outcome === "failed" ? "Failed" : "In_Review");
+    const i0 = this.store.issue(a.issue_key)!;
+    // A failure worth retrying is retried after a backoff while retries are left, then the task is Blocked.
+    const retryable = outcome === "failed" && !!o.reason && RETRYABLE.includes(o.reason);
+    const maxRetries = this.settings.maxRetries ?? 2;
+    const retryLeft = retryable && i0.retries < maxRetries;
+    const detail = retryable && !retryLeft && maxRetries > 0 ? `${o.detail ?? o.reason} (gave up after ${i0.retries} automatic retr${i0.retries === 1 ? "y" : "ies"})` : o.detail;
+    const issueStatus: IssueStatus = retryable && !retryLeft ? "Blocked" : (o.issueStatus ?? (outcome === "failed" ? "Failed" : "In_Review"));
     this.store.tx(() => {
-      this.store.updateAttempt(a.id, { outcome, flag: o.flag ?? a.flag, step: "ended", ended_at: new Date().toISOString() });
+      this.store.updateAttempt(a.id, { outcome, flag: o.flag ?? a.flag, reason: o.reason ?? null, waiting: null, step: "ended", ended_at: new Date().toISOString() });
       const i = this.store.issue(a.issue_key)!;
       if (["In_Progress", "Awaiting_Human", "Ready"].includes(i.status))
-        this.store.setIssueStatus(a.issue_key, issueStatus, "system", o.reason ?? null, { attempt: a.n, outcome, flag: o.flag ?? null, detail: o.detail ?? null });
-      this.store.event("attempt_ended", { issue: a.issue_key, attempt: a.id, detail: { outcome, flag: o.flag ?? null, detail: o.detail ?? null, head: a.head_sha } });
+        this.store.setIssueStatus(a.issue_key, issueStatus, "system", o.reason ?? null, { attempt: a.n, outcome, flag: o.flag ?? null, detail: detail ?? null });
+      if (retryLeft) {
+        const at = new Date(Date.now() + (this.settings.retryBackoffMs ?? 60_000) * 2 ** i.retries).toISOString();
+        this.store.updateIssue(a.issue_key, { retry_at: at });
+        this.store.event("retry_scheduled", { issue: a.issue_key, attempt: a.id, detail: { retry: i.retries + 1, of: maxRetries, at, reason: o.reason } });
+      } else if (!retryable && outcome !== "failed" && (i.retries || i.retry_at)) this.store.updateIssue(a.issue_key, { retries: 0, retry_at: null });
+      this.store.event("attempt_ended", { issue: a.issue_key, attempt: a.id, detail: { outcome, reason: o.reason ?? null, flag: o.flag ?? null, detail: detail ?? null, head: a.head_sha } });
     });
+    for (const [run, w] of this.watched) if (w.attemptId === a.id) this.watched.delete(run);
+    if (o.reason === "INFRA_ERROR") this.tripBreaker();
     if (issueStatus === "In_Review")
       void this.host.notify({ title: `${a.issue_key} is ready for your review`, body: o.flag ? `Flagged ${o.flag}. ${o.detail ?? ""}` : "Checks and review passed.", key: `review:${a.issue_key}`, screen: "board" });
+    if (issueStatus === "Blocked" && retryable)
+      void this.host.notify({ title: `${a.issue_key} is blocked`, body: detail ?? "", key: `blocked:${a.issue_key}`, screen: "board" });
+  }
+
+  // ---------- supervision ----------
+  /**
+   * Watch every running agent turn of a task: stop one that has been silent for the idle timeout or has
+   * run past the turn timeout (time spent waiting on a question or a permission card doesn't count).
+   * Stopping interrupts the turn; if it hasn't ended after the grace period, Foundry stops the agent.
+   */
+  async supervise(now = Date.now()) {
+    if (this.supervising) return;
+    this.supervising = true;
+    try {
+      const live = new Set<number>();
+      for (const a of this.store.activeAttempts()) {
+        if (a.ended_at || !["build", "fix", "review"].includes(a.step)) continue;
+        const agentId = a.step === "review" ? a.reviewer_agent_id : a.builder_agent_id;
+        if (!agentId) continue;
+        const run = this.openRun(a.id, agentId);
+        if (!run) continue;
+        live.add(run);
+        let w = this.watched.get(run);
+        if (!w) this.watched.set(run, (w = { attemptId: a.id, agentId, startedAt: now, lastActivity: now, pausedMs: 0, pausedSince: null }));
+        if (w.stopping) {
+          if (now - w.stopping.at >= (this.settings.stopGraceMs ?? 30_000)) await this.forceStop(a, w);
+          continue;
+        }
+        if (a.waiting || this.store.get("SELECT 1 FROM questions WHERE attempt_id=? AND status='live'", a.id)) {
+          w.pausedSince ??= now;
+          continue;
+        }
+        if (w.pausedSince !== null) {
+          w.pausedMs += now - w.pausedSince;
+          w.pausedSince = null;
+          w.lastActivity = now;
+        }
+        if (w.polledAt === undefined || now - w.polledAt >= (this.settings.activityPollMs ?? 10_000)) {
+          w.polledAt = now;
+          const marker = await this.activity(a, agentId);
+          if (marker !== null && marker !== w.marker) {
+            if (w.marker !== undefined) w.lastActivity = now;
+            w.marker = marker;
+          }
+        }
+        const idleMs = this.settings.idleTimeoutMs ?? 15 * 60_000;
+        const turnMs = this.settings.turnTimeoutMs ?? 60 * 60_000;
+        const role = a.step === "review" ? "reviewer" : "builder";
+        if (idleMs > 0 && now - w.lastActivity >= idleMs) await this.stopTurn(a, w, `the ${role} was silent for ${minutes(now - w.lastActivity)}`);
+        else if (turnMs > 0 && now - w.startedAt - w.pausedMs >= turnMs) await this.stopTurn(a, w, `the ${role}'s turn ran for ${minutes(now - w.startedAt - w.pausedMs)}`);
+      }
+      for (const run of [...this.watched.keys()]) if (!live.has(run)) this.watched.delete(run);
+    } finally {
+      this.supervising = false;
+    }
+  }
+
+  /** What the agent last did, plus the builder's uncommitted changes: either changing is activity. */
+  private async activity(a: Attempt, agentId: string) {
+    const host = await this.host.agentActivity(agentId).catch(() => null);
+    const files = a.step !== "review" && a.worktree_path && existsSync(a.worktree_path) ? await git(a.worktree_path, "status", "--porcelain").catch(() => "") : "";
+    return host === null && !files ? null : `${host ?? ""}|${files}`;
+  }
+
+  private async stopTurn(a: Attempt, w: Watched, why: string) {
+    w.stopping = { at: Date.now(), why };
+    this.store.event("turn_timeout", { issue: a.issue_key, attempt: a.id, detail: { agent: w.agentId, step: a.step, why } });
+    await this.host.interrupt(w.agentId).catch(() => {});
+  }
+
+  /** The interrupted turn didn't end in time: stop the agent and end the attempt. */
+  private async forceStop(a: Attempt, w: Watched) {
+    await this.locks.with(`attempt:${a.issue_key}`, async () => {
+      const fresh = this.store.attempt(a.id)!;
+      if (fresh.ended_at) return;
+      this.store.event("agent_killed", { issue: a.issue_key, attempt: a.id, detail: { agent: w.agentId, why: w.stopping!.why } });
+      this.endStopped(fresh, `${w.stopping!.why}; it didn't stop when interrupted, so Foundry stopped the agent`);
+      await this.host.kill(w.agentId).catch((e) => this.store.event("kill_failed", { issue: a.issue_key, attempt: a.id, detail: { agent: w.agentId, error: String(e) } }));
+    });
+    await this.tick();
+  }
+
+  /** The turn that just ended is one Foundry stopped for running too long or going silent. */
+  private stoppedTurn(a: Attempt, agentId: string) {
+    for (const w of this.watched.values()) if (w.attemptId === a.id && w.agentId === agentId && w.stopping) return w.stopping;
+    return null;
+  }
+
+  private endStopped(a: Attempt, why: string) {
+    for (const r of this.store.runs(a.id).filter((r) => r.status === "running")) this.store.endRun(r.id, "failed", { error: why });
+    this.endAttempt(a.id, "failed", { reason: "TIMEOUT", detail: why });
+  }
+
+  /** Paseo shows a permission card for a task's agent: its clocks pause and the board says so. */
+  onPermission(agentId: string, waiting: boolean) {
+    const a = this.store.attemptByAgent(agentId);
+    if (!a || a.ended_at) return;
+    this.store.updateAttempt(a.id, { waiting: waiting ? "permission" : null });
+    this.store.event(waiting ? "permission_waiting" : "permission_answered", { issue: a.issue_key, attempt: a.id, detail: { agent: agentId } });
+  }
+
+  /** Retries whose backoff has passed start now. */
+  private async startDueRetries() {
+    const now = Date.now();
+    for (const i of this.store.all<Issue>("SELECT * FROM issues WHERE retry_at IS NOT NULL AND status IN ('Failed','Blocked')")) {
+      if (Date.parse(i.retry_at!) > now) continue;
+      this.store.tx(() => {
+        this.store.updateIssue(i.key, { retries: i.retries + 1, retry_at: null });
+        this.store.setIssueStatus(i.key, "Ready", "system", null, { why: `automatic retry ${i.retries + 1}` });
+      });
+      await this.start(i.key, "system").catch((e) => this.store.event("start_error", { issue: i.key, detail: { error: String(e) } }));
+    }
+  }
+
+  /** Auto-start is paused after repeated infrastructure failures, until you resume it. */
+  autostartPaused(): { at: string; why: string } | null {
+    const v = this.store.meta(BREAKER_KEY);
+    return v ? (JSON.parse(v) as { at: string; why: string }) : null;
+  }
+
+  private tripBreaker() {
+    if (this.autostartPaused()) return;
+    const threshold = this.settings.breakerThreshold ?? 3;
+    const since = new Date(Date.now() - (this.settings.breakerWindowMs ?? 10 * 60_000)).toISOString().replace("T", " ").slice(0, 19);
+    const n = this.store.get<{ n: number }>("SELECT COUNT(*) n FROM events WHERE kind='attempt_ended' AND json_extract(detail,'$.reason')='INFRA_ERROR' AND at>=?", since)!.n;
+    if (threshold <= 0 || n < threshold) return;
+    const why = `${n} infrastructure failures in a row`;
+    this.store.setMeta(BREAKER_KEY, JSON.stringify({ at: new Date().toISOString(), why }));
+    this.store.event("autostart_paused", { detail: { why, failures: n } });
+    void this.host.notify({ title: "Foundry paused auto-start", body: `${why}. Check Paseo (workspaces, harnesses), then resume auto-start on the board.`, key: "autostart-paused", screen: "board" });
+  }
+
+  resumeAutostart(actor: Actor = "you") {
+    if (!this.autostartPaused()) return { paused: false };
+    this.store.setMeta(BREAKER_KEY, null);
+    this.store.event("autostart_resumed", { actor });
+    void this.tick();
+    return { paused: false };
   }
 
   // ---------- tools ----------
@@ -1040,4 +1231,9 @@ export class TaskLoop {
     }
     await this.tick();
   }
+}
+
+function minutes(ms: number) {
+  const m = Math.round(ms / 60_000);
+  return m >= 1 ? `${m} min` : `${Math.max(1, Math.round(ms / 1000))} s`;
 }

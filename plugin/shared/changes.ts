@@ -15,6 +15,8 @@ export const CHANGES: Change[] = [
       "Your own loops: a .foundry/loops/<name>.yaml file on base adds a loop with the same steps and rules as the built-ins. A file that doesn't validate is listed on the project page with what's wrong.",
       "Bug fixes are reproduced: on the bugfix loop Foundry runs the new test with the fix reverted (it must fail) and with it (it must pass), and shows both runs at review. A fix without a test, or with a test that passes anyway, goes back to the builder, then comes to you flagged REPRO_FAILED.",
       "Page checks: on the frontend loop Foundry starts your paseo.json service, runs your \"page-check\" script against it (it gets FOUNDRY_PAGE_URL, FOUNDRY_PAGES and FOUNDRY_SCREENSHOTS) and shows the screenshots it saves at review. Your script owns the browser. A project without a service or a page-check script skips the step; a failing page check goes back to the builder, then comes to you flagged PAGE_CHECK_FAILED.",
+      "Supervision: a builder or reviewer turn that goes silent for 15 minutes, or runs for an hour, is interrupted (and stopped if it doesn't end). Time spent waiting on your answer or on a Paseo permission card doesn't count, and the board shows \"waiting on permission in Paseo\". A timeout, an infrastructure error or a failed turn is retried automatically, twice by default with a growing wait, then the task is Blocked. Change the limits in Foundry's settings.",
+      "After repeated infrastructure failures Foundry pauses auto-start and says so on the project page; resume it there once Paseo is fixed. You can still start tasks yourself.",
     ],
   },
   {

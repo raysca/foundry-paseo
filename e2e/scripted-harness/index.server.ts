@@ -194,6 +194,12 @@ async function script(s: Session, text: string): Promise<string> {
 
   // Loop 2 builder. Task titles decide what the scripted builder does.
   const task = /Foundry builder working on (\S+): (.*)/.exec(text);
+  // The supervision e2e test: the first builder of a task titled "... (silent once)" never answers.
+  if (task && /\(silent once\)/.test(task[2]!) && !silenced.has(task[1]!)) {
+    silenced.add(task[1]!);
+    log(`going silent on ${task[1]}`);
+    return new Promise<string>(() => {});
+  }
   if (task && /shout\(\)/.test(task[2]!)) {
     write(cwd, "shout/core.py", "def shout(text):\n    return text.upper() + \"!\"\n");
     write(cwd, "tests/test_core.py", "import unittest\n\nfrom shout.core import shout\n\n\nclass ShoutTest(unittest.TestCase):\n    def test_shout(self):\n        self.assertEqual(shout(\"hi\"), \"HI!\")\n");
@@ -300,6 +306,7 @@ const SHOUT_REQS = [
 const LOUD_REQ = { ref: "R3", title: "Loud alias", acceptance_criteria: ["WHERE --loud is given THE CLI SHALL behave as with --shout"] };
 
 const failedOnce = new Set<string>();
+const silenced = new Set<string>();
 const SLICED = process.env.FAKE_SLICES === "1";
 
 function implementLoud(cwd: string) {

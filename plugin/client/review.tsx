@@ -7,7 +7,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { Image, Text, View } from "react-native";
 import { actionRpc } from "../shared/rpc";
-import { Badge, Btn, Card, Choice, Field, go, LoopPick, Page, parseJson, Row, SCREEN, Section, short, STATUS_TONE, T, Themed, useAct, useFoundry, DiffLines } from "./kit";
+import { Badge, Btn, Card, Choice, Field, go, LoopPick, SupervisionBadges, Page, parseJson, Row, SCREEN, Section, short, STATUS_TONE, T, Themed, useAct, useFoundry, DiffLines } from "./kit";
 
 export function IssueScreen(props: PluginScreenProps) {
   return (
@@ -53,8 +53,10 @@ function Issue({ issueKey, openAgent }: { issueKey: string; openAgent?: (agentId
           <T size={16}>{i.title}</T>
           <Badge label={i.status.replace("_", " ")} tone={STATUS_TONE[i.status]} />
           {i.flag ? <Badge label={i.flag} tone="warning" /> : null}
+          <SupervisionBadges issue={i} attempt={a} />
         </Row>
         {i.reason ? <T muted size={13}>{i.reason}</T> : null}
+        <Supervision events={r?.events ?? []} />
         {i.description ? <T size={13}>{i.description}</T> : null}
         {i.acceptance ? <T muted size={13}>Exit criteria: {i.acceptance}</T> : null}
         {parseJson<string[]>(i.requirement_refs, []).length ? <T muted size={12}>Covers {parseJson<string[]>(i.requirement_refs, []).join(", ")}</T> : null}
@@ -138,6 +140,21 @@ function Retry({ issueKey, projectKey }: { issueKey: string; projectKey: string 
       <T size={13}>This task stopped. Ask the project manager to retry or cancel it; it proposes a card and warns first if other work is affected.</T>
       <Row><Btn label="Ask the project manager" onPress={() => go(SCREEN.chat, { project: projectKey, issue: issueKey })} /></Row>
     </Card>
+  );
+}
+
+/** The latest things supervision did to this task: a turn it stopped, an agent it had to stop, a retry. */
+function Supervision({ events }: { events: any[] }) {
+  const rows = events.filter((e) => ["turn_timeout", "agent_killed", "retry_scheduled"].includes(e.kind)).slice(0, 4);
+  if (!rows.length) return null;
+  return (
+    <View style={{ gap: 2 }}>
+      {rows.map((e) => (
+        <T key={e.id} muted size={12}>
+          {e.kind === "turn_timeout" ? `Stopped a turn: ${e.detail.why}.` : e.kind === "agent_killed" ? "The agent didn't stop when interrupted, so Foundry stopped it." : `Automatic retry ${e.detail.retry} of ${e.detail.of} after ${e.detail.reason}.`} {e.at}
+        </T>
+      ))}
+    </View>
   );
 }
 
