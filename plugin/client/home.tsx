@@ -47,6 +47,7 @@ function Home({ projectKey }: { projectKey?: string }) {
       <Row wrap>
         <Btn label={proposedCards ? `Project manager (${proposedCards} card${proposedCards === 1 ? "" : "s"})` : "Project manager"} onPress={() => go(SCREEN.chat, { project: project.key })} />
       </Row>
+      <AutostartPaused paused={s.autostart_paused} />
       <ShipMode project={project} />
       <DefaultLoop project={project} />
       <WhatsNew ob={s.onboarding} />
@@ -515,5 +516,22 @@ function Orphans({ s, hostId }: { s: State; hostId: string }) {
         </Card>
       ))}
     </Section>
+  );
+}
+
+/** Auto-start paused after repeated infrastructure failures: say why, and resume it once Paseo is fixed. */
+function AutostartPaused({ paused }: { paused: { at: string; why: string } | null }) {
+  const act = useAct();
+  if (!paused) return null;
+  return (
+    <Card>
+      <Row wrap>
+        <Badge label="auto-start paused" tone="danger" />
+        <T size={13}>{paused.why}. Foundry isn't starting tasks or retries on its own until you resume. Check Paseo's workspaces and harnesses first.</T>
+      </Row>
+      <Row>
+        <Btn label="Resume auto-start" kind="primary" disabled={act.pending} onPress={() => void act.run("autostart.resume", {})} />
+      </Row>
+    </Card>
   );
 }

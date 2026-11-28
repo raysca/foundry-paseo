@@ -1,7 +1,7 @@
 // Paseo host adapter: the only file that knows Paseo's SDK. Reused from the POC (kit v3.3) behind the
 // core Host interface: hidden workspaces, agents with pre-assigned ids, role profiles, paseo.json
 // scripts, timeline rows, metadata, notifications, and the hooks that guard Foundry's state.
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { resolve, sep } from "node:path";
 import type { PaseoApi } from "@getpaseo/client";
 import type { PluginServerContext, AgentToolDefinition } from "@getpaseo/plugin/server";
@@ -21,6 +21,8 @@ export interface HostEvents {
   onAgentArchived(agentId: string): Promise<void>;
   /** The harness's own "ask the user" tool, routed into Foundry's question flow. Resolves with the answer, or null to deny. */
   onNativeQuestion(agentId: string, text: string): Promise<string | null>;
+  /** A Paseo permission card is waiting on the developer for this agent (true), or was answered (false). */
+  onPermission(agentId: string, waiting: boolean): void;
 }
 
 export interface AdapterConfig {
@@ -302,6 +304,26 @@ export class PaseoAdapter implements Host {
     }
   }
 
+  async agentActivity(agentId: string): Promise<string | null> {
+    try {
+      const page = await this.paseo.agents.ref(agentId).timeline.refetch({ direction: "tail", limit: 1 } as never);
+      const entries = (page as { entries?: unknown[] }).entries ?? [];
+      const last = entries[entries.length - 1];
+      return last === undefined ? "" : createHash("sha1").update(JSON.stringify(last)).digest("hex");
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Paseo has no hard stop for a turn that ignores cancel, so Foundry archives the agent, which stops
+   * its runtime (upstream ask: a force-stop for an agent's turn). Foundry never reuses that agent.
+   */
+  async kill(agentId: string) {
+    const c = await this.daemon();
+    await c.archiveAgent(agentId);
+  }
+
   async lastReply(agentId: string) {
     const page = await this.paseo.agents.ref(agentId).timeline.refetch({ direction: "tail", limit: 1, wholeTurns: true });
     const parts: string[] = [];
@@ -499,6 +521,18 @@ export class PaseoAdapter implements Host {
           this.store.event("foreign_terminal_refused", { actor: "host-user", detail: { cwd: request.cwd } });
           throw new Error("This worktree is owned by Foundry.");
         }
+      }),
+    );
+
+    // Permission cards stay Paseo's to answer; Foundry only pauses its timers and shows the wait.
+    removers.push(
+      add("agent.permission.before", async ({ agent }) => {
+        if (this.store.agent(agent.id)) this.events.onPermission(agent.id, true);
+      }),
+    );
+    removers.push(
+      add("agent.permission.after", async ({ agent }) => {
+        if (this.store.agent(agent.id)) this.events.onPermission(agent.id, false);
       }),
     );
 

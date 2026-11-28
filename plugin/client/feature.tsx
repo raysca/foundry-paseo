@@ -7,7 +7,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { actionRpc } from "../shared/rpc";
 import { Pressable, Text, View } from "react-native";
-import { Badge, Btn, Card, Choice, DiffLines, Empty, Field, go, LoopPick, Page, parseJson, Progress, Row, SCREEN, Section, short, STATUS_TONE, T, Themed, useAct, useColors, useFoundry, type State } from "./kit";
+import { Badge, Btn, Card, Choice, DiffLines, Empty, Field, go, LoopPick, Page, parseJson, Progress, Row, SCREEN, Section, short, STATUS_TONE, T, Themed, useAct, useColors, useFoundry, type State, SupervisionBadges } from "./kit";
 
 export function FeatureScreen(props: PluginScreenProps) {
   return (
@@ -530,6 +530,7 @@ function Tasks({ s, f }: { s: State; f: any }) {
             <Badge label={i.status.replace("_", " ")} tone={STATUS_TONE[i.status]} />
             {i.flag ? <Badge label={i.flag} tone="warning" /> : null}
             {i.status === "In_Review" ? <Badge label="review it" tone="info" /> : null}
+            <SupervisionBadges issue={i} attempt={s.attempts.find((a: any) => a.issue_key === i.key)} />
           </Row>
           {i.reason ? <T muted size={12}>{i.reason}</T> : null}
         </Card>

@@ -24,6 +24,10 @@ export interface Turn {
   git(...args: string[]): string;
   /** The agent's reply text for this turn (what lastReply returns). */
   reply(text: string): void;
+  /** Resolves when Foundry interrupts this agent. */
+  stopped: Promise<void>;
+  /** Shows activity (a timeline item), as a working agent does. */
+  ping(): void;
 }
 
 /** What an agent does in a turn. Return a non-"completed" kind to make the turn fail. */
@@ -137,6 +141,12 @@ export class FakeHost implements Host {
     this.pending++;
     // Runs at once, so a fast agent ends its turn before startAgent has returned (as on a real daemon).
     void (async () => {
+      let stop!: () => void;
+      const stopped = new Promise<void>((r) => (stop = r));
+      this.stoppers.set(agentId, stop);
+      let kill!: () => void;
+      const killed = new Promise<"killed">((r) => (kill = () => r("killed")));
+      this.killers.set(agentId, kill);
       try {
         a.turns++;
         const b = this.behaviours[a.role];
@@ -153,13 +163,17 @@ export class FakeHost implements Host {
           read: (f) => readFileSync(join(a.path, f), "utf8"),
           git: (...args) => run(a.path, "git", ...args),
           reply: (r) => void this.replies.set(agentId, r),
+          stopped,
+          ping: () => void this.activityCount.set(agentId, (this.activityCount.get(agentId) ?? 0) + 1),
         };
         this.replies.delete(agentId);
         let kind = "completed";
         try {
           const out = b ? b(t) : undefined;
-          const r = out instanceof Promise ? await out : out;
-          if (typeof r === "string") kind = r;
+          // A killed agent's turn ends as canceled whatever its behaviour was doing.
+          const r = out instanceof Promise ? await Promise.race([out, killed]) : out;
+          if (r === "killed") kind = "canceled";
+          else if (typeof r === "string") kind = r;
         } catch (e) {
           kind = "failed";
           a.messages.push(`behaviour threw: ${String(e)}`);
@@ -184,6 +198,18 @@ export class FakeHost implements Host {
 
   async interrupt(agentId: string) {
     this.interrupted.push(agentId);
+    this.stoppers.get(agentId)?.();
+  }
+  private stoppers = new Map<string, () => void>();
+  private killers = new Map<string, () => void>();
+  activityCount = new Map<string, number>();
+  killed: string[] = [];
+  async agentActivity(agentId: string) {
+    return String(this.activityCount.get(agentId) ?? 0);
+  }
+  async kill(agentId: string) {
+    this.killed.push(agentId);
+    this.killers.get(agentId)?.();
   }
   async agentStatus() {
     return "idle" as const;

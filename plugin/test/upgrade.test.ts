@@ -40,10 +40,14 @@ for (let k = 1; k < SCHEMA_VERSION; k++) {
     // Projects from before schema 11 keep merging locally; one made at 11 or later has ship_mode already.
     assert.equal(s.projects()[0]!.ship_mode, k < 11 ? "local_merge" : "pr", "a project from before keeps merging locally");
     assert.equal(s.feature(1)!.round, 1, "a feature from before is on its first delivery");
-    // A feature that had tasks becomes a one-slice feature, its tasks in that slice.
+    // A feature that had tasks before schema 13 becomes a one-slice feature, its tasks in that slice.
     const sl = s.slices(1);
-    assert.deepEqual(sl.map((x) => [x.n, x.title, x.branch]), [[1, "Shout mode", "foundry/feature/shout-mode"]]);
-    assert.equal(s.issue("SHT-1")!.slice_id, sl[0]!.id);
+    if (k < 13) {
+      assert.deepEqual(sl.map((x) => [x.n, x.title, x.branch]), [[1, "Shout mode", "foundry/feature/shout-mode"]]);
+      assert.equal(s.issue("SHT-1")!.slice_id, sl[0]!.id);
+    }
+    // Schema 14: no task has automatic retries yet.
+    assert.deepEqual([s.issue("SHT-1")!.retries, s.issue("SHT-1")!.retry_at], [0, null]);
     s.close();
     const b = backups(d);
     assert.equal(b.length, 1);
@@ -80,15 +84,15 @@ test("a failing migration rolls back: the version and data stay as they were, an
   const path = join(d, "foundry.db");
   const last = SCHEMA_VERSION - 1;
   atVersion(path, last);
-  // Something in the way of the last migration (it creates slices, after which the rest must not stay).
+  // Something in the way of the last migration's second step: its first (issues.retries) must not stay.
   const db = new DatabaseSync(path);
-  db.exec("CREATE TABLE slices (x INTEGER)");
+  db.exec("ALTER TABLE issues ADD COLUMN retry_at TEXT");
   db.close();
   assert.throws(() => new Store(path), (e: any) => e.code === "MIGRATION_FAILED" && new RegExp(`unchanged at schema ${last}`).test(e.message));
   const after = new DatabaseSync(path);
   assert.equal((after.prepare("SELECT value FROM meta WHERE key='schema_version'").get() as any).value, String(last));
   assert.equal((after.prepare("SELECT COUNT(*) n FROM issues").get() as any).n, 1);
-  assert.ok(!(after.prepare("PRAGMA table_info(issues)").all() as any[]).some((c) => c.name === "slice_id"), "no part of the failed migration stayed");
+  assert.ok(!(after.prepare("PRAGMA table_info(issues)").all() as any[]).some((c) => c.name === "retries"), "no part of the failed migration stayed");
   after.close();
   assert.equal(backups(d).length, 1);
 });

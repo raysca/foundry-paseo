@@ -79,6 +79,26 @@ export function FoundrySettingsScreen(_: PluginSurfaceProps) {
             initialValue={String(st.values.questionWindowSeconds)}
             onChangeText={(t) => setDraft((d) => ({ ...d, questionWindowSeconds: Number(t) }))}
           />
+          <SettingsInput
+            label="Stop a silent agent turn after (minutes, 0 = never)"
+            initialValue={String(st.values.idleMinutes)}
+            onChangeText={(t) => setDraft((d) => ({ ...d, idleMinutes: Number(t) }))}
+          />
+          <SettingsInput
+            label="Stop an agent turn running longer than (minutes, 0 = never)"
+            initialValue={String(st.values.turnMinutes)}
+            onChangeText={(t) => setDraft((d) => ({ ...d, turnMinutes: Number(t) }))}
+          />
+          <SettingsInput
+            label="Automatic retries before a task is Blocked"
+            initialValue={String(st.values.retries)}
+            onChangeText={(t) => setDraft((d) => ({ ...d, retries: Number(t) }))}
+          />
+          <SettingsInput
+            label="First retry after (seconds, doubles each time)"
+            initialValue={String(st.values.retryBackoffSeconds)}
+            onChangeText={(t) => setDraft((d) => ({ ...d, retryBackoffSeconds: Number(t) }))}
+          />
           <SettingsAction
             label={st.saveError ?? "Applies to new attempts"}
             actionLabel={st.saving ? "Saving" : "Save"}

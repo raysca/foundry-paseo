@@ -56,6 +56,18 @@ export class Foundry {
         get checkTimeoutMs() {
           return settings().checkTimeoutMs;
         },
+        get idleTimeoutMs() {
+          return settings().idleTimeoutMs;
+        },
+        get turnTimeoutMs() {
+          return settings().turnTimeoutMs;
+        },
+        get maxRetries() {
+          return settings().maxRetries;
+        },
+        get retryBackoffMs() {
+          return settings().retryBackoffMs;
+        },
         shotsDir: cfg.home ? join(cfg.home, "shots") : undefined,
       },
       () => this.requireSetup(),
@@ -92,6 +104,7 @@ export class Foundry {
   /** One scheduler pass: start Ready work, move features whose Build has ended to Verify, and every
    * 30 seconds post failed and flagged tasks to the PM. */
   async tick() {
+    await this.tasks.supervise();
     await this.tasks.tick();
     await this.delivery.checkBuildDone();
     if (Date.now() - this.lastPrCheck >= (this.cfg.prPollMs ?? 5 * 60_000)) {
@@ -314,6 +327,10 @@ export class Foundry {
     // Foundry archives a task's workspaces when it is accepted; only an archive mid-attempt is the host's doing.
     const att = this.store.attemptByAgent(agentId);
     if (a && att && !att.ended_at) this.store.event("agent_archived_by_host", { actor: "host-user", issue: a.issue_key, attempt: a.attempt_id, detail: { agentId } });
+  }
+
+  onPermission(agentId: string, waiting: boolean) {
+    this.tasks.onPermission(agentId, waiting);
   }
 
   /** A harness's own question tool (Claude's AskUserQuestion and the like), routed like ask_human. */

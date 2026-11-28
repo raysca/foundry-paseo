@@ -128,6 +128,10 @@ export interface Issue {
   flag: string | null;
   /** The slice of its feature it ships in (null for quick tasks). */
   slice_id: number | null;
+  /** Automatic retries since the task last got through a supervised failure. */
+  retries: number;
+  /** When the next automatic retry starts (ISO), while one is scheduled. */
+  retry_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -158,6 +162,10 @@ export interface Attempt {
   reworks: number;
   head_sha: string | null;
   tree_sha: string | null;
+  /** Why a failed attempt failed. */
+  reason: ReasonCode | null;
+  /** What the running agent waits on: "permission" (a Paseo permission card), else null. */
+  waiting: string | null;
   started_at: string;
   ended_at: string | null;
 }
@@ -460,6 +468,12 @@ export const MIGRATIONS: readonly string[] = [
      FROM features f WHERE EXISTS (SELECT 1 FROM issues i WHERE i.feature_id=f.id);
    UPDATE issues SET slice_id=(SELECT s.id FROM slices s WHERE s.feature_id=issues.feature_id AND s.n=1) WHERE feature_id IS NOT NULL;
    UPDATE verifications SET slice_id=(SELECT s.id FROM slices s WHERE s.feature_id=verifications.feature_id AND s.n=1);`,
+  // 14: supervision. Automatic retries of a task (how many since it last got through, and when the next
+  // starts), why an attempt failed, and what its agent is waiting on (a question or a permission).
+  `ALTER TABLE issues ADD COLUMN retries INTEGER NOT NULL DEFAULT 0;
+   ALTER TABLE issues ADD COLUMN retry_at TEXT;
+   ALTER TABLE attempts ADD COLUMN reason TEXT;
+   ALTER TABLE attempts ADD COLUMN waiting TEXT;`,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
@@ -971,6 +985,15 @@ export class Store {
   activeAttempts() {
     return this.all<Attempt>("SELECT * FROM attempts WHERE ended_at IS NULL ORDER BY id");
   }
+  /** A value Foundry keeps for itself (the auto-start breaker); null removes it. */
+  meta(key: string): string | null {
+    return this.get<{ value: string }>("SELECT value FROM meta WHERE key=?", key)?.value ?? null;
+  }
+  setMeta(key: string, value: string | null) {
+    if (value === null) this.run("DELETE FROM meta WHERE key=?", key);
+    else this.run("INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", key, value);
+  }
+
   updateAttempt(id: number, patch: Partial<Omit<Attempt, "id" | "issue_key" | "n" | "started_at">>) {
     this.patch("attempts", "id", id, patch);
   }

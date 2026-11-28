@@ -58,6 +58,8 @@ jobs:
         run: bash e2e/slices.sh
       - name: Page checks (a frontend task's page step runs the project's page check against its Paseo service)
         run: bash e2e/pages.sh
+      - name: Supervision (a silent builder is stopped, retried after a backoff, and the retry passes)
+        run: bash e2e/supervision.sh
       - name: M1 exit test (extended Shout scenario with a spec edit during Build, Verify and Ship)
         run: bash e2e/exit.sh
       - name: updating Foundry keeps its data (install-local.sh run twice over a project and feature)
