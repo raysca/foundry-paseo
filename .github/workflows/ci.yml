@@ -62,6 +62,8 @@ jobs:
         run: bash e2e/supervision.sh
       - name: Quick tasks (a quick task ships as its own PR; its builder's discovered work lands in Backlog)
         run: bash e2e/quicktasks.sh
+      - name: M3 exit test (task flows: frontend page check, bugfix repro, a project loop, a silent builder retried, a quick task PR)
+        run: bash e2e/flows.sh
       - name: M1 exit test (extended Shout scenario with a spec edit during Build, Verify and Ship)
         run: bash e2e/exit.sh
       - name: updating Foundry keeps its data (install-local.sh run twice over a project and feature)

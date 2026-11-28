@@ -264,6 +264,18 @@ async function plan(s: Session, dir: string, text: string): Promise<string> {
     }
     return [await plan(s, dir, "Step 2"), await plan(s, dir, "plan.md with"), await plan(s, dir, "call propose_tasks")].join(" ");
   }
+  if (text.includes("call propose_tasks") && FLOWS) {
+    // FAKE_FLOWS: the M3 exit test's three tasks. The page task comes back as backend, so the test picks
+    // frontend for it before approving; the bug fix is on bugfix; the docs task is on a project loop.
+    const r = await call(s, "propose_tasks", {
+      tasks: [
+        { ref: "T1", title: "Add a Shout button to the home page", requirement_refs: ["R2"], touches: ["site/index.html"], size: "S", loop: "backend", checks: { pages: ["/"] } },
+        { ref: "T2", title: "Fix shout() dropping the exclamation mark", requirement_refs: ["R1"], touches: ["shout/core.py", "tests/test_core.py"], size: "S", loop: "bugfix", checks: { scripts: ["unittest"] } },
+        { ref: "T3", title: "Document the CLI (silent once)", requirement_refs: ["R2"], touches: ["docs/loud.md"], size: "S", loop: "careful" },
+      ],
+    });
+    return `Proposed the task graph. ${r}`;
+  }
   if (text.includes("call propose_tasks")) {
     const r = await call(s, "propose_tasks", {
       tasks: [
@@ -314,6 +326,7 @@ const failedOnce = new Set<string>();
 const silenced = new Set<string>();
 const reported = new Set<string>();
 const SLICED = process.env.FAKE_SLICES === "1";
+const FLOWS = process.env.FAKE_FLOWS === "1";
 
 function implementLoud(cwd: string) {
   const p = join(cwd, "shout/cli.py");
