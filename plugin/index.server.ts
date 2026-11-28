@@ -218,6 +218,8 @@ export default function contribute(server: PluginServerContext) {
           return foundry.planning.revise(Number(args.id), args.kind, String(args.note ?? ""), "you", (args.comments ?? []).map(Number));
         case "feature.comment":
           return foundry.planning.comment(Number(args.id), args.kind, String(args.sha ?? ""), Number(args.line), String(args.body ?? ""));
+        case "feature.resolve_comment":
+          return foundry.planning.resolveComment(Number(args.comment));
         case "feature.delete_comment":
           return foundry.planning.deleteComment(Number(args.comment));
         case "feature.revisions":

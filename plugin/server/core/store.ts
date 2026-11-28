@@ -156,7 +156,7 @@ export interface AgentRecord {
   created_at: string;
 }
 
-export type CommentStatus = "saved" | "sent";
+export type CommentStatus = "saved" | "sent" | "resolved";
 export interface DocComment {
   id: number;
   feature_id: number;
@@ -169,6 +169,7 @@ export interface DocComment {
   status: CommentStatus;
   created_at: string;
   sent_at: string | null;
+  resolved_at: string | null;
 }
 
 export interface Question {
@@ -393,12 +394,12 @@ export const MIGRATIONS: readonly string[] = [
   `CREATE TABLE branches (
      repo TEXT NOT NULL, branch TEXT NOT NULL, purpose TEXT NOT NULL,
      created_at TEXT NOT NULL DEFAULT (datetime('now')), PRIMARY KEY(repo, branch));`,
-  // 9: comments on lines of a feature's docs (yours, saved then sent in a revision request; or the PM's)
+  // 9: comments on lines of a feature's docs (yours: saved, sent with a revision request, resolved; or the PM's)
   `CREATE TABLE doc_comments (
      id INTEGER PRIMARY KEY, feature_id INTEGER NOT NULL REFERENCES features(id), doc TEXT NOT NULL,
      sha TEXT NOT NULL, line INTEGER NOT NULL, quote TEXT NOT NULL DEFAULT '', body TEXT NOT NULL,
      author TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'saved', created_at TEXT NOT NULL DEFAULT (datetime('now')),
-     sent_at TEXT);
+     sent_at TEXT, resolved_at TEXT);
    CREATE INDEX doc_comments_feature ON doc_comments(feature_id, doc);`,
 ];
 
