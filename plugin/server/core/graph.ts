@@ -44,6 +44,7 @@ export interface TaskChecksInput {
   scripts?: string[];
   paths?: string[];
   repro?: { script?: string; files?: string[] };
+  pages?: string[];
 }
 
 export interface ProposedTask {
@@ -388,7 +389,7 @@ export function renderTasks(title: string, tasks: ProposedTask[], g: GraphResult
   const row = (r: string) => {
     const t = byRef.get(r)!;
     const dep = (t.depends_on ?? []).map((d) => `${d.ref}${d.reason ? ` (${d.reason})` : ""}`).join("; ");
-    const checks = [...(t.checks?.scripts ?? []), ...(t.checks?.paths ?? []).map((p) => `path ${p}`)].join(", ");
+    const checks = [...(t.checks?.scripts ?? []), ...(t.checks?.paths ?? []).map((p) => `path ${p}`), ...(t.checks?.pages ?? []).map((p) => `page ${p}`)].join(", ");
     // A change set's new task says which slice it joins.
     const where = existing.length && t.slice ? ` (slice ${t.slice})` : "";
     return `| ${r} | ${esc(t.title)}${where} | ${(t.requirement_refs ?? []).join(", ")} | ${esc(dep)} | ${t.size ?? ""} | ${t.loop ?? "default"} | ${esc(checks)} |`;

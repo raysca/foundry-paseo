@@ -56,6 +56,7 @@ export class Foundry {
         get checkTimeoutMs() {
           return settings().checkTimeoutMs;
         },
+        shotsDir: cfg.home ? join(cfg.home, "shots") : undefined,
       },
       () => this.requireSetup(),
     );

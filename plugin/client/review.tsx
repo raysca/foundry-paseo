@@ -5,7 +5,7 @@ import { useRpc } from "@getpaseo/plugin/client";
 import { Loading, ScrollView } from "@getpaseo/plugin/client/ui";
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
-import { Text, View } from "react-native";
+import { Image, Text, View } from "react-native";
 import { actionRpc } from "../shared/rpc";
 import { Badge, Btn, Card, Choice, Field, go, LoopPick, Page, parseJson, Row, SCREEN, Section, short, STATUS_TONE, T, Themed, useAct, useFoundry, DiffLines } from "./kit";
 
@@ -164,13 +164,38 @@ function Runs({ runs }: { runs: any[] }) {
   return (
     <Section title="Runs">
       {runs.map((x) => (
-        <Row key={x.id} wrap>
-          <Badge label={x.status} tone={x.status === "passed" || x.status === "completed" ? "success" : x.status === "running" ? "info" : x.status === "failed" ? "danger" : "muted"} />
-          <T size={13}>{x.kind}{x.detail?.name ? ` ${x.detail.name}` : ""}{x.detail?.round ? ` (fix round ${x.detail.round})` : ""}{x.detail?.rework ? ` (rework ${x.detail.rework})` : ""}</T>
-          <T muted size={12} mono>{short(x.sha)}</T>
-        </Row>
+        <View key={x.id} style={{ gap: 6 }}>
+          <Row wrap>
+            <Badge label={x.status} tone={x.status === "passed" || x.status === "completed" ? "success" : x.status === "running" ? "info" : x.status === "failed" ? "danger" : "muted"} />
+            <T size={13}>{x.kind}{x.detail?.name ? ` ${x.detail.name}` : ""}{x.detail?.round ? ` (fix round ${x.detail.round})` : ""}{x.detail?.rework ? ` (rework ${x.detail.rework})` : ""}</T>
+            <T muted size={12} mono>{short(x.sha)}</T>
+          </Row>
+          {(x.detail?.screenshots ?? []).length ? <Shots runId={x.id} files={x.detail.screenshots} /> : null}
+        </View>
       ))}
     </Section>
+  );
+}
+
+/** A page check's screenshots, fetched one by one from the run. */
+function Shots({ runId, files }: { runId: number; files: string[] }) {
+  return (
+    <Row wrap>
+      {files.map((f) => (
+        <Shot key={f} runId={runId} file={f} />
+      ))}
+    </Row>
+  );
+}
+
+function Shot({ runId, file }: { runId: number; file: string }) {
+  const action = useRpc(actionRpc);
+  const q = useQuery({ queryKey: ["foundry-shot", runId, file], staleTime: Infinity, queryFn: () => action({ action: "run.screenshot", args: { id: runId, file } }) as Promise<{ uri: string }> });
+  return (
+    <View style={{ gap: 2 }}>
+      {q.data ? <Image source={{ uri: q.data.uri }} style={{ width: 320, height: 200, borderRadius: 6 }} resizeMode="contain" accessibilityLabel={`Screenshot ${file}`} /> : <T muted size={12}>Loading {file}</T>}
+      <T muted size={11} mono>{file}</T>
+    </View>
   );
 }
 

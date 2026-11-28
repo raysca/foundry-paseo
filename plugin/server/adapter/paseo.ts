@@ -6,7 +6,7 @@ import { resolve, sep } from "node:path";
 import type { PaseoApi } from "@getpaseo/client";
 import type { PluginServerContext, AgentToolDefinition } from "@getpaseo/plugin/server";
 import { DaemonClient } from "@getpaseo/client/internal/daemon-client";
-import type { AgentSpec, AgentStatus, Harness, Host, WorktreeRequest, HostFacts, HostProfile, ProfileChoice, ScriptResult, StartedAgent, TimelineData } from "../core/host";
+import type { AgentSpec, AgentStatus, Harness, Host, WorktreeRequest, HostFacts, HostProfile, ProfileChoice, ScriptResult, ServiceStart, StartedAgent, TimelineData } from "../core/host";
 import type { Role } from "../core/model";
 import type { Store } from "../core/store";
 import { profileId, roleProfile } from "../core/setup";
@@ -368,6 +368,51 @@ export class PaseoAdapter implements Host {
     }
     await c.stopWorkspaceScript(o.workspaceId, o.script).catch(() => {});
     return { code: 124, output: (await capture()) + "\n[foundry] check timed out", terminalId };
+  }
+
+  /**
+   * Start a service script and wait until it answers. Paseo picks the port (PASEO_PORT) and reports it
+   * in the workspace's script list; Foundry treats the service as up once Paseo calls it healthy or a
+   * plain HTTP request to the port gets any answer.
+   */
+  async startService(o: { workspaceId: string; script: string; timeoutMs: number }): Promise<ServiceStart> {
+    const c = await this.daemon();
+    const started = await c.startWorkspaceScriptWithStatus(o.workspaceId, o.script);
+    const err = (started as { error?: string }).error;
+    if (err) return { ok: false, output: `[foundry] Paseo could not start service ${o.script}: ${err}`, terminalId: null };
+    const terminalId = (started as { script?: { terminalId?: string } }).script?.terminalId ?? null;
+    const capture = async () => {
+      if (!terminalId) return "";
+      const cap = (await this.paseo.terminals.ref(terminalId).capture({ start: 0, stripAnsi: true } as never).catch(() => null)) as { lines: string[] } | null;
+      return (cap?.lines ?? []).join("\n").trimEnd();
+    };
+    const deadline = Date.now() + o.timeoutMs;
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 400));
+      const list = (await c.listWorkspaceScripts(o.workspaceId).catch(() => null)) as {
+        scripts?: { scriptName: string; lifecycle: string; port?: number | null; health?: string | null; terminalId?: string | null }[];
+      } | null;
+      const s = list?.scripts?.find((x) => x.scriptName === o.script);
+      if (!s) continue;
+      if (s.lifecycle === "stopped") return { ok: false, output: (await capture()) + "\n[foundry] the service exited", terminalId };
+      if (!s.port) continue;
+      const url = `http://127.0.0.1:${s.port}`;
+      if (s.health === "healthy") return { ok: true, url, terminalId };
+      const ac = new AbortController();
+      const timer = setTimeout(() => ac.abort(), 1500);
+      const up = await fetch(url, { signal: ac.signal }).then(
+        () => true,
+        () => false,
+      );
+      clearTimeout(timer);
+      if (up) return { ok: true, url, terminalId };
+    }
+    return { ok: false, output: (await capture()) + "\n[foundry] the service didn't answer in time", terminalId };
+  }
+
+  async stopService(workspaceId: string, script: string) {
+    const c = await this.daemon();
+    await c.stopWorkspaceScript(workspaceId, script).catch(() => {});
   }
 
   // ---------- mirroring ----------

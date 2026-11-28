@@ -2,9 +2,10 @@
 // runner checks, reviewer) and comes back as committed code bound to a SHA. The runner, not the agent,
 // decides whether it passed. Concurrency is Paseo's: Foundry decides only the order work starts in.
 import { randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { filesFromBase, paseoScripts, reproScript, resolveChecks, splitRepro, tail, type TaskChecks } from "./checks";
+import { filesFromBase, paseoScripts, paseoServices, reproScript, resolveChecks, resolvePage, SHOT_FILE, splitRepro, tail, type TaskChecks } from "./checks";
 import { assertIntegrationUntouched, featureDir, steering } from "./features";
 import { frontSlice, mergeForward, setTargetHead, sliceAllowsAutoStart, sliceOfIssue, target } from "./slices";
 import { changedPaths, commitAll, FOUNDRY_IDENT, git, head, HOST_IDENT, identEnv, sh, treeOf } from "./git";
@@ -18,7 +19,12 @@ export interface LoopSettings {
   maxFixRounds: number;
   questionWindowMs: number;
   checkTimeoutMs: number;
+  /** Where page checks leave their screenshots (Foundry's home in production); a temp folder if unset. */
+  shotsDir?: string;
 }
+
+/** How long a page step waits for its service to answer. */
+const SERVICE_START_MS = 120_000;
 
 interface VerdictInput {
   decision: Verdict;
@@ -312,8 +318,8 @@ export class TaskLoop {
       if (a.ended_at) return;
       const step = loop.steps[a.step_index];
       if (!step) return this.finish(a);
-      if (step.kind === "check" || step.kind === "repro") {
-        const r = step.kind === "check" ? await this.runCheckStep(a, step) : await this.runReproStep(a, step);
+      if (step.kind === "check" || step.kind === "repro" || step.kind === "page") {
+        const r = step.kind === "check" ? await this.runCheckStep(a, step) : step.kind === "repro" ? await this.runReproStep(a, step) : await this.runPageStep(a, step);
         if (r === "passed" || r === "skipped") {
           this.store.updateAttempt(a.id, { step_index: a.step_index + 1 });
           continue;
@@ -411,7 +417,7 @@ export class TaskLoop {
     a: Attempt,
     step: { max_fix_rounds?: number },
     sha: string,
-    o: { flag: "CHECKS_FAILED" | "REPRO_FAILED"; what: string; names: string[]; missing?: string[]; lines: string[] },
+    o: { flag: "CHECKS_FAILED" | "REPRO_FAILED" | "PAGE_CHECK_FAILED"; what: string; names: string[]; missing?: string[]; lines: string[] },
   ): Promise<"fixing" | "ended"> {
     const i = this.store.issue(a.issue_key)!;
     const fresh = this.store.attempt(a.id)!;
@@ -420,7 +426,7 @@ export class TaskLoop {
     const budget = step.max_fix_rounds ?? i.max_fix_rounds ?? this.settings.maxFixRounds;
     if (fresh.fix_rounds >= budget) {
       // Checks name what failed; a repro says why, since there is one step and several ways to fail it.
-      const why = o.flag === "REPRO_FAILED" ? o.lines.map((l) => l.split("\n")[0]).join(" ") : o.names.concat(missing.map((m) => `path ${m}`)).join(", ");
+      const why = o.flag !== "CHECKS_FAILED" ? o.lines.map((l) => l.split("\n")[0]).join(" ") : o.names.concat(missing.map((m) => `path ${m}`)).join(", ");
       this.endAttempt(a.id, "rework", { flag: o.flag, detail: `${o.what} still failing after ${fresh.fix_rounds} fix round(s): ${why}` });
       return "ended";
     }
@@ -514,6 +520,65 @@ export class TaskLoop {
     return fail(lines);
   }
 
+  /**
+   * The app's pages: start the paseo.json service in the check workspace (at the commit, with paseo.json
+   * and the page check's files from base), run the page check script against it, keep the screenshots
+   * it leaves in FOUNDRY_SCREENSHOTS for the review, then stop the service. The page check owns the
+   * browser; Foundry only runs it. A service that doesn't come up or a failing check is a fix round,
+   * then PAGE_CHECK_FAILED rework.
+   */
+  private async runPageStep(a: Attempt, step: Extract<LoopStep, { kind: "page" }>): Promise<"passed" | "skipped" | "fixing" | "ended"> {
+    const i = this.store.issue(a.issue_key)!;
+    const p = this.store.project(i.project_id)!;
+    if (!a.head_sha) throw new Error(`${a.issue_key} has no commit to check`);
+    const sha = a.head_sha;
+    const resolved = resolvePage(step, await paseoScripts(p.repo, p.base_ref), await paseoServices(p.repo, p.base_ref));
+    if (resolved.kind === "skip") {
+      this.store.event("check_skipped", { issue: i.key, attempt: a.id, detail: { step: step.name, hint: resolved.hint } });
+      return "skipped";
+    }
+    this.store.updateAttempt(a.id, { step: "check" });
+    const fail = (lines: string[]) => this.fixOrEnd(a, step, sha, { flag: "PAGE_CHECK_FAILED", what: "page check", names: [step.name], lines });
+    if (resolved.kind === "unknown") return fail([resolved.message]);
+    const { service, script } = resolved;
+
+    const { ws, path } = await this.checkWorkspace(a, i, p, sha);
+    const fromBase = await filesFromBase(p.repo, p.base_ref, [script]);
+    await git(path, "checkout", "-q", p.base_ref, "--", ...fromBase);
+    const timeoutMs = step.timeout_minutes ? step.timeout_minutes * 60_000 : this.settings.checkTimeoutMs;
+
+    const svcRun = this.store.startRun("check", { attempt: a.id, sha, detail: { name: `${step.name}: start ${service}`, service } });
+    const started = await this.host.startService({ workspaceId: ws, script: service, timeoutMs: Math.min(SERVICE_START_MS, timeoutMs) });
+    if (!started.ok) {
+      this.store.endRun(svcRun, "failed", { tail: tail(started.output, 4000), terminal: started.terminalId });
+      await this.host.stopService(ws, service).catch(() => {});
+      return fail([`The "${service}" service didn't come up for the page check. Last output:\n${tail(started.output, 4000)}`]);
+    }
+    this.store.endRun(svcRun, "passed", { url: started.url, terminal: started.terminalId });
+
+    const runId = this.store.startRun("check", { attempt: a.id, sha, detail: { name: step.name, command: script.command, service, page: true } });
+    const dir = join(this.settings.shotsDir ?? join(tmpdir(), "foundry-shots"), i.key, `${a.n}-${runId}`);
+    mkdirSync(dir, { recursive: true });
+    const task = parse<TaskChecks>(i.checks, {});
+    const env = { FOUNDRY_PAGE_URL: started.url, FOUNDRY_PAGES: (task.pages ?? []).join("\n"), FOUNDRY_SCREENSHOTS: dir };
+    let r: Awaited<ReturnType<Host["runScript"]>>;
+    try {
+      r = await this.host.runScript({ workspaceId: ws, script: script.name, env, timeoutMs });
+    } finally {
+      await this.host.stopService(ws, service).catch(() => {});
+    }
+    const shots = readdirSync(dir).filter((f) => SHOT_FILE.test(f)).sort().slice(0, 20);
+    const status = r.code === 0 ? "passed" : "failed";
+    this.store.endRun(runId, status, { code: r.code, tail: tail(r.output, 4000), terminal: r.terminalId, url: started.url, dir, screenshots: shots });
+    if (a.builder_agent_id)
+      void this.host.timeline(a.builder_agent_id, `foundry-check-${runId}`, { step: "check", name: step.name, status, code: r.code, sha, tail: tail(r.output, 1200), screenshots: shots.map((f) => join(dir, f)) });
+    if (r.code === 0) return "passed";
+    return fail([
+      `The page check "${script.name}" against ${started.url} exited ${r.code}. Last output:\n${tail(r.output, 4000)}`,
+      ...(shots.length ? [`Its screenshots (open them to see the page):\n${shots.map((f) => join(dir, f)).join("\n")}`] : []),
+    ]);
+  }
+
   private async startReview(a: Attempt, step: Extract<LoopStep, { kind: "review" }>) {
     const i = this.store.issue(a.issue_key)!;
     const p = this.store.project(i.project_id)!;
@@ -521,6 +586,10 @@ export class TaskLoop {
     const diff = await git(p.repo, "diff", `${fork}..${a.head_sha}`).catch((e) => String(e));
     const checkRuns = this.store.runs(a.id).filter((r) => r.kind === "check");
     const checkLines = checkRuns.slice(-12).map((r) => `- ${parse<{ name?: string }>(r.detail, {}).name ?? "check"}: ${r.status}`);
+    // The latest page check's screenshots, at this commit: the reviewer opens them to see the pages.
+    const pageRun = [...checkRuns].reverse().find((r) => r.sha === a.head_sha && parse<{ page?: boolean }>(r.detail, {}).page);
+    const pageDetail = pageRun ? parse<{ dir?: string; screenshots?: string[]; url?: string }>(pageRun.detail, {}) : null;
+    const shotLines = pageDetail?.dir && pageDetail.screenshots?.length ? pageDetail.screenshots.map((f) => `- ${join(pageDetail.dir!, f)}`) : [];
     const agentId = randomUUID();
     this.store.updateAttempt(a.id, { reviewer_agent_id: agentId, step: "review" });
     this.store.startRun("review", { attempt: a.id, agent: agentId, sha: a.head_sha });
@@ -531,6 +600,7 @@ export class TaskLoop {
       f ? `The approved spec and plan are in ${featureDir(f.slug)}/.` : "",
       `Review commit ${a.head_sha} against ${baseRef}.`,
       checkLines.length ? `Check results:\n${checkLines.join("\n")}` : "No checks ran for this task.",
+      shotLines.length ? `Screenshots from the page check (open them to see the pages as a user would):\n${shotLines.join("\n")}` : "",
       `Diff:\n\`\`\`diff\n${diff.slice(0, 40_000)}\n\`\`\``,
       step.prompt ?? "",
       "Call report_verdict exactly once: pass, rework (with findings the builder must fix), fail, or human (with action_required). Do not edit files: anything you change is reset.",

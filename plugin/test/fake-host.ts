@@ -1,12 +1,13 @@
 // A Host for loop tests: real git worktrees in a temp dir, scripted agents, and paseo.json scripts run
 // with `sh -c`. It stands in for Paseo the way the adapter does, so the loop under test is the real one.
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { createConnection, createServer } from "node:net";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { sh } from "../server/core/git";
 import { profilesPatch, removeProfilesPatch } from "../server/adapter/profiles";
-import type { AgentSpec, Harness, Host, WorktreeRequest, HostFacts, ProfileChoice, ScriptResult, StartedAgent, TimelineData } from "../server/core/host";
+import type { AgentSpec, Harness, Host, WorktreeRequest, HostFacts, ProfileChoice, ScriptResult, ServiceStart, StartedAgent, TimelineData } from "../server/core/host";
 import type { Role } from "../server/core/model";
 import type { Store } from "../server/core/store";
 
@@ -56,6 +57,25 @@ export function fixtureRepo(): string {
   run(repo, "git", "add", "-A");
   run(repo, "git", "commit", "-q", "-m", "init");
   return repo;
+}
+
+function freePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const srv = createServer();
+    srv.once("error", reject);
+    srv.listen(0, "127.0.0.1", () => {
+      const port = (srv.address() as { port: number }).port;
+      srv.close(() => resolve(port));
+    });
+  });
+}
+
+function answers(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const c = createConnection({ port, host: "127.0.0.1" });
+    c.once("connect", () => (c.destroy(), resolve(true)));
+    c.once("error", () => resolve(false));
+  });
 }
 
 export class FakeHost implements Host {
@@ -197,9 +217,41 @@ export class FakeHost implements Host {
   async runScript(o: { workspaceId: string; script: string; env: Record<string, string>; timeoutMs: number }): Promise<ScriptResult> {
     const ws = this.workspaces.get(o.workspaceId)!;
     const cfg = JSON.parse(readFileSync(join(ws.path, "paseo.json"), "utf8")) as { scripts: Record<string, { command: string }> };
-    const r = await sh("sh", ["-c", cfg.scripts[o.script]!.command], { cwd: ws.path, timeoutMs: o.timeoutMs });
+    const r = await sh("sh", ["-c", cfg.scripts[o.script]!.command], { cwd: ws.path, timeoutMs: o.timeoutMs, env: { ...process.env, ...o.env } });
     this.scripts.push({ script: o.script, code: r.code });
     return { code: r.code, output: r.stdout + r.stderr, terminalId: null };
+  }
+
+  /** Services run as Paseo runs them: PASEO_PORT and HOST in the env, up once the port answers. */
+  services = new Map<string, { child: ChildProcess; output: string[] }>();
+  serviceLog: string[] = [];
+  async startService(o: { workspaceId: string; script: string; timeoutMs: number }): Promise<ServiceStart> {
+    const ws = this.workspaces.get(o.workspaceId)!;
+    const cfg = JSON.parse(readFileSync(join(ws.path, "paseo.json"), "utf8")) as { scripts: Record<string, { command: string }> };
+    const port = await freePort();
+    const child = spawn("sh", ["-c", cfg.scripts[o.script]!.command], { cwd: ws.path, env: { ...process.env, PASEO_PORT: String(port), HOST: "127.0.0.1" }, detached: true, stdio: ["ignore", "pipe", "pipe"] });
+    const output: string[] = [];
+    child.stdout!.on("data", (d) => output.push(String(d)));
+    child.stderr!.on("data", (d) => output.push(String(d)));
+    let exited = false;
+    child.on("exit", () => (exited = true));
+    this.services.set(`${o.workspaceId}:${o.script}`, { child, output });
+    this.serviceLog.push(`start ${o.script}`);
+    const deadline = Date.now() + o.timeoutMs;
+    while (Date.now() < deadline && !exited) {
+      if (await answers(port)) return { ok: true, url: `http://127.0.0.1:${port}`, terminalId: null };
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    return { ok: false, output: output.join("") + (exited ? "" : "\n[fake] timed out"), terminalId: null };
+  }
+  async stopService(workspaceId: string, script: string) {
+    const s = this.services.get(`${workspaceId}:${script}`);
+    if (!s) return;
+    this.services.delete(`${workspaceId}:${script}`);
+    this.serviceLog.push(`stop ${script}`);
+    try {
+      process.kill(-s.child.pid!, "SIGTERM");
+    } catch {}
   }
 
   async timeline(_agentId: string, _rowId: string, data: TimelineData) {
