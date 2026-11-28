@@ -6,9 +6,10 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node
 import { dirname, join } from "node:path";
 import { ensureIntegration, featureDir, reopenOnBase, steering, uniqueSlug, type Reopened } from "./features";
 import { activeSlices, setTargetStage, target } from "./slices";
+import { loopNames, projectLoops, type ProjectLoops } from "./loops";
 import { firstRemote } from "./github";
 import { changedPaths, commitAll, FOUNDRY_IDENT, git, head, HOST_IDENT, PM_IDENT, sh } from "./git";
-import { diffRequirements, lintRequirements, renumbered, validateChangeSet, type RequirementDiff, renderRequirements, withRequirements, renderTasks, validateTasks, validateSlices, type GraphResult, type ProposedRequirement, type ProposedSlice, type ProposedTask, type SliceResult } from "./graph";
+import { checkLoops, diffRequirements, lintRequirements, renumbered, validateChangeSet, type RequirementDiff, renderRequirements, withRequirements, renderTasks, validateTasks, validateSlices, type GraphResult, type ProposedRequirement, type ProposedSlice, type ProposedTask, type SliceResult } from "./graph";
 import type { Host } from "./host";
 import type { Locks } from "./locks";
 import { FoundryError, TERMINAL_STATUSES, type Actor, type DocKind, type FeatureStage } from "./model";
@@ -162,6 +163,7 @@ export class Planning {
       "call propose_tasks with the task graph.",
       "Each task has a ref (T1, T2, …), title, description, exit_criteria, requirement_refs (together they must cover every requirement), depends_on (task refs, each with a reason), touches (paths from the plan), size (S, M or L) and checks.scripts (names of paseo.json scripts).",
       "Group the tasks into slices when the feature is more than a handful of tasks: slices: [{n, title, goal}] and a slice number on each task. Slices ship in order (1 first), each as its own PR with its own Verify, so each slice must deliver working behaviour on its own (thin and end to end, not all the backend first). A task depends only on tasks in its own or an earlier slice. Aim for at most 8 tasks per slice and 4 slices per feature; a feature bigger than that should be split into separate features. A small feature is one slice: leave slices out.",
+      "Give each task a loop, the steps it runs through: bugfix for a task that fixes a defect (it reproduces the bug with a test first), docs for a task that only touches documentation, frontend for a task that changes what a user sees, backend for everything else. A project loop in .foundry/loops/<name>.yaml can be named too. Leave loop out for the project's default.",
       "Do not write tasks.md; Foundry writes it. If propose_tasks returns errors, fix them and call it again.",
     ].join("\n");
   }
@@ -172,6 +174,8 @@ export class Planning {
       if (this.turns.has(featureId)) throw new FoundryError("FEATURE_BUSY", "The project manager is working on this feature");
       await this.beforeStart();
       const f = this.store.feature(featureId)!;
+      const proj = this.store.project(f.project_id)!;
+      this.loops.set(f.project_id, await projectLoops(proj.repo, proj.base_ref).catch(() => ({ loops: {}, invalid: {} })));
       const agentId = f.planner_agent_id ?? randomUUID();
       const runId = this.store.startRun("plan", { feature: f.id, agent: agentId, sha: f.head_sha, detail: { stage } });
       const timer = this.settings.turnTimeoutMs > 0 ? setTimeout(() => void this.host.interrupt(agentId).catch(() => {}), this.settings.turnTimeoutMs) : null;
@@ -504,13 +508,21 @@ export class Planning {
     if (this.turns.get(f.id)!.stage === "change_set") return this.proposeChangeSet(f, tasks);
     if (f.stage !== "tasks" && this.turns.get(f.id)!.stage !== "quick") throw new FoundryError("TOOL_REFUSED", "Tasks are proposed once the plan is approved, or in a change turn");
     const reqs = this.store.requirements(f.id).map((r) => r.ref);
+    const loopWarnings = this.checkTaskLoops(f, tasks);
     const graph = validateTasks(tasks, reqs, this.unfinishedIssues(f));
     const sl = validateSlices(f.title, slices, tasks);
-    const result = { ...graph, warnings: [...graph.warnings, ...sl.warnings] };
+    const result = { ...graph, warnings: [...graph.warnings, ...sl.warnings, ...loopWarnings] };
     const declared = sl.slices.map(({ n, title, goal }) => ({ n, title, goal }));
     const prop = this.store.addProposal(f.id, tasks, result, "initial", declared);
     this.store.event("tasks_proposed", { actor: "pm", project: f.project_id, feature: f.id, detail: { proposal: prop.id, tasks: tasks.length, slices: declared.length, warnings: result.warnings.length } });
     return { recorded: true, proposal: prop.id, waves: result.waves, critical_path: result.critical_path, slices: sl.slices.map((x) => ({ n: x.n, title: x.title, tasks: x.tasks, requirements: x.requirement_refs })), warnings: result.warnings };
+  }
+
+  /** Loops read from base when the planning turn started (built-ins only until then). */
+  private loops = new Map<number, ProjectLoops>();
+  private checkTaskLoops(f: Feature, tasks: ProposedTask[]) {
+    const pl = this.loops.get(f.project_id) ?? { loops: {}, invalid: {} };
+    return checkLoops(tasks, loopNames(pl), pl.invalid);
   }
 
   /** The slices of a proposal as they stand (with your edits and cuts), or null when they don't validate. */
@@ -529,7 +541,7 @@ export class Planning {
    */
   async editSlices(
     featureId: number,
-    op: { kind: "move_task"; ref: string; slice: number } | { kind: "move_slice"; from: number; to: number } | { kind: "merge"; from: number; into: number } | { kind: "rename"; slice: number; title: string; goal?: string },
+    op: { kind: "move_task"; ref: string; slice: number } | { kind: "move_slice"; from: number; to: number } | { kind: "merge"; from: number; into: number } | { kind: "rename"; slice: number; title: string; goal?: string } | { kind: "set_loop"; ref: string; loop: string | null },
     actor: Actor = "you",
   ) {
     return this.locks.with(`feature:${featureId}`, async () => {
@@ -541,7 +553,17 @@ export class Planning {
       let slices = parse<ProposedSlice[]>(prop.slices, []);
       if (!slices.length) slices = [{ n: 1, title: f.title }];
       const has = (n: number) => slices.some((x) => x.n === n);
-      if (op.kind === "move_task") {
+      if (op.kind === "set_loop") {
+        // Pick a task's loop before you approve: a built-in or a valid loop in .foundry/loops on base.
+        const t = tasks.find((x) => x.ref === op.ref);
+        if (!t) throw new FoundryError("NOT_FOUND", `No task ${op.ref}`);
+        const p = this.store.project(f.project_id)!;
+        const pl = await projectLoops(p.repo, p.base_ref);
+        this.loops.set(f.project_id, pl);
+        if (op.loop) checkLoops([{ ...t, loop: op.loop }], loopNames(pl), pl.invalid);
+        if (op.loop) t.loop = op.loop;
+        else delete t.loop;
+      } else if (op.kind === "move_task") {
         const t = tasks.find((x) => x.ref === op.ref);
         if (!t) throw new FoundryError("NOT_FOUND", `No task ${op.ref}`);
         if (op.slice === slices.length + 1) slices.push({ n: op.slice, title: `Slice ${op.slice}` });
@@ -574,7 +596,7 @@ export class Planning {
       let result = parse<GraphResult>(prop.result, {} as GraphResult);
       try {
         const graph = validateTasks(tasks.map((t) => ({ ...t, depends_on: (t.depends_on ?? []).filter((d) => !cut.includes(d.ref)) })), this.store.requirements(f.id).map((r) => r.ref), this.unfinishedIssues(f), cut);
-        result = { ...graph, warnings: [...graph.warnings, ...validateSlices(f.title, slices, tasks, cut).warnings] };
+        result = { ...graph, warnings: [...graph.warnings, ...validateSlices(f.title, slices, tasks, cut).warnings, ...this.checkTaskLoops(f, tasks.filter((t) => !cut.includes(t.ref)))] };
       } catch (e) {
         if (!(e instanceof FoundryError)) throw e;
         result = { ...result, warnings: ((e.detail.errors as string[]) ?? [e.message]).map((x) => `Blocks approval: ${x}`) };
@@ -1121,7 +1143,9 @@ export class Planning {
     const existing = this.store.issues({ featureId: f.id }).map((i) => ({ key: i.key, status: i.status, requirement_refs: parse<string[]>(i.requirement_refs, []), touches: parse<string[]>(i.touches, []) }));
     const others = this.unfinishedIssues(f).filter((o) => !existing.some((e) => e.key === o.key));
     this.checkChangeSlices(f, tasks);
-    const result = validateChangeSet(tasks, diff, existing, others);
+    const loopWarnings = this.checkTaskLoops(f, tasks.filter((t) => !t.issue || t.tag === "update"));
+    const g = validateChangeSet(tasks, diff, existing, others);
+    const result = { ...g, warnings: [...g.warnings, ...loopWarnings] };
     const prop = this.store.addProposal(f.id, tasks, result, "change");
     this.store.event("change_set_proposed", { actor: "pm", project: f.project_id, feature: f.id, detail: { proposal: prop.id, entries: tasks.length } });
     return { recorded: true, proposal: prop.id, waves: result.waves, warnings: result.warnings };
@@ -1173,7 +1197,7 @@ export class Planning {
           const key = e.issue!;
           applied[key] = e.tag!;
           if (e.tag === "update")
-            this.store.updateIssue(key, { title: e.title || this.store.issue(key)!.title, description: e.description ?? "", acceptance: e.exit_criteria ?? "", checks: JSON.stringify(e.checks ?? {}), requirement_refs: JSON.stringify(e.requirement_refs ?? []), touches: JSON.stringify(e.touches ?? []) }, actor);
+            this.store.updateIssue(key, { title: e.title || this.store.issue(key)!.title, description: e.description ?? "", acceptance: e.exit_criteria ?? "", checks: JSON.stringify(e.checks ?? {}), requirement_refs: JSON.stringify(e.requirement_refs ?? []), touches: JSON.stringify(e.touches ?? []), ...(e.loop !== undefined ? { loop: e.loop || null } : {}) }, actor);
           else if (e.tag === "flag") this.store.updateIssue(key, { flag: "SPEC_CHANGED" }, actor);
           else if (e.tag === "cancel") this.store.setIssueStatus(key, "Cancelled", actor, null, { why: "spec change", change: change.id });
         }

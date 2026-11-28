@@ -6,7 +6,7 @@ import { Loading, ScrollView, useToast } from "@getpaseo/plugin/client/ui";
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { View } from "react-native";
-import { Badge, Btn, Card, Choice, Empty, Field, go, Page, Progress, Row, SCREEN, Section, T, Themed, useAct, useColors, useFoundry, type State } from "./kit";
+import { Badge, Btn, Card, Choice, Empty, Field, go, LoopPick, Page, Progress, Row, SCREEN, Section, T, Themed, useAct, useColors, useFoundry, useLoops, type State } from "./kit";
 import { actionRpc } from "../shared/rpc";
 import { PROFILE_ROLES } from "../shared/roles";
 
@@ -48,6 +48,7 @@ function Home({ projectKey }: { projectKey?: string }) {
         <Btn label={proposedCards ? `Project manager (${proposedCards} card${proposedCards === 1 ? "" : "s"})` : "Project manager"} onPress={() => go(SCREEN.chat, { project: project.key })} />
       </Row>
       <ShipMode project={project} />
+      <DefaultLoop project={project} />
       <WhatsNew ob={s.onboarding} />
       <Setup setup={s.setup} />
       <NewFeature projectKey={project.key} />
@@ -72,6 +73,27 @@ function Home({ projectKey }: { projectKey?: string }) {
         </Section>
       ) : null}
     </Page>
+  );
+}
+
+/** The loop this project's tasks run when they name none, and any loop file on base that doesn't validate. */
+function DefaultLoop({ project }: { project: any }) {
+  const act = useAct();
+  const loops = useLoops(project.id);
+  return (
+    <View style={{ gap: 4 }}>
+      <Row wrap>
+        <T muted size={13}>Tasks run on, by default:</T>
+        <Choice
+          value={project.default_loop ?? "backend"}
+          onChange={(loop) => void act.run("project.set_default_loop", { id: project.id, loop }).then(() => loops.refetch())}
+          options={(loops.data?.loops ?? [{ name: "backend", source: "built-in" }]).map((l) => ({ value: l.name, label: l.source === "project" ? `${l.name} (project)` : l.name }))}
+        />
+      </Row>
+      {(loops.data?.invalid ?? []).map((x) => (
+        <T key={x.name} size={12}>⚠ .foundry/loops/{x.name}.yaml can't be used: {x.errors.join(" ")}</T>
+      ))}
+    </View>
   );
 }
 

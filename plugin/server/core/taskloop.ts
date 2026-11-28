@@ -10,7 +10,7 @@ import { frontSlice, mergeForward, setTargetHead, sliceAllowsAutoStart, sliceOfI
 import { changedPaths, commitAll, FOUNDRY_IDENT, git, head, HOST_IDENT, identEnv, sh, treeOf } from "./git";
 import type { Host } from "./host";
 import type { Locks } from "./locks";
-import { resolveLoop, stepIndex, type LoopDef, type LoopStep } from "./loops";
+import { BUILTIN_LOOPS, loopNames, projectLoops, resolveLoop, stepIndex, type LoopDef, type LoopStep } from "./loops";
 import { FoundryError, type Actor, type AttemptOutcome, type IssueStatus, type ReasonCode, type Verdict } from "./model";
 import { parse, type Attempt, type Issue, type Question, type Store } from "./store";
 
@@ -75,6 +75,42 @@ export class TaskLoop {
       if (this.store.deps(i.key).length && !this.unmetDeps(i.key).length) this.store.setIssueStatus(i.key, "Ready", "system", null, { why: "dependencies done" });
   }
 
+  // ---------- loops ----------
+  /** The loops a project can use: the built-ins and its own from .foundry/loops on base (invalid files with their errors). */
+  async loops(projectId: number) {
+    const p = this.store.project(projectId);
+    if (!p) throw new FoundryError("NOT_FOUND", `No project ${projectId}`);
+    const pl = await projectLoops(p.repo, p.base_ref);
+    const all = { ...BUILTIN_LOOPS, ...pl.loops };
+    return {
+      default: p.default_loop ?? "backend",
+      loops: loopNames(pl).map((n) => ({ name: n, source: all[n]!.source, steps: all[n]!.steps.map((s) => ({ kind: s.kind, name: s.name })) })),
+      invalid: Object.entries(pl.invalid).map(([name, errors]) => ({ name, errors })),
+    };
+  }
+
+  private async assertLoop(projectId: number, loop: string) {
+    const p = this.store.project(projectId)!;
+    resolveLoop(loop, null, await projectLoops(p.repo, p.base_ref));
+  }
+
+  /** The loop a project's tasks run when they name none. */
+  async setDefaultLoop(projectId: number, loop: string | null, actor: Actor = "you") {
+    if (loop) await this.assertLoop(projectId, loop);
+    return this.store.setDefaultLoop(projectId, loop || null, actor);
+  }
+
+  /** Change a task's loop while it isn't running; the next attempt runs it. */
+  async setIssueLoop(key: string, loop: string | null, actor: Actor = "you") {
+    const i = this.store.issue(key);
+    if (!i) throw new FoundryError("NOT_FOUND", `No issue ${key}`);
+    if (!["Backlog", "Ready", "Failed", "Blocked"].includes(i.status)) throw new FoundryError("INVALID_TRANSITION", `${key} is ${i.status}; change its loop when it isn't running`, { current: i.status });
+    if (loop) await this.assertLoop(i.project_id, loop);
+    this.store.updateIssue(key, { loop: loop || null, ...(i.flag === "LOOP_MISSING" ? { flag: null } : {}) }, actor);
+    this.store.event("issue_loop_set", { actor, issue: key, detail: { from: i.loop, to: loop || null } });
+    return this.store.issue(key)!;
+  }
+
   unmetDeps(key: string) {
     return this.store
       .deps(key)
@@ -108,7 +144,7 @@ export class TaskLoop {
     const project = this.store.project(i.project_id)!;
     let loop: LoopDef;
     try {
-      loop = resolveLoop(i.loop, project.default_loop);
+      loop = resolveLoop(i.loop, project.default_loop, await projectLoops(project.repo, project.base_ref));
     } catch (e) {
       if (e instanceof FoundryError && e.code === "LOOP_MISSING") {
         this.store.updateIssue(key, { flag: "LOOP_MISSING" });
@@ -755,7 +791,7 @@ export class TaskLoop {
     const waiting = this.unmetDeps(key);
     if (waiting.length) throw new FoundryError("DEPENDENCIES_NOT_DONE", `${key} waits for ${waiting.join(", ")}`, { waiting_for: waiting });
     const project = this.store.project(i.project_id)!;
-    const loop = resolveLoop(i.loop, project.default_loop);
+    const loop = resolveLoop(i.loop, project.default_loop, await projectLoops(project.repo, project.base_ref));
     const a = this.store.tx(() => {
       const a = this.store.createAttempt(key, prev.branch, loop);
       this.store.updateAttempt(a.id, {

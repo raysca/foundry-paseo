@@ -257,6 +257,12 @@ export default function contribute(server: PluginServerContext) {
           return foundry.delivery.taskFromFailure(Number(args.id), String(args.title ?? ""), String(args.description ?? ""), Array.isArray(args.requirement_refs) ? args.requirement_refs.map(String) : [], "you", args.slice ? Number(args.slice) : null);
         case "feature.refresh_pr":
           return { results: await foundry.delivery.refreshPrs(Number(args.id), "you") };
+        case "project.loops":
+          return foundry.tasks.loops(Number(args.id ?? store.projectByKey(String(args.project))?.id));
+        case "project.set_default_loop":
+          return foundry.tasks.setDefaultLoop(Number(args.id ?? store.projectByKey(String(args.project))?.id), args.loop ? String(args.loop) : null);
+        case "issue.set_loop":
+          return foundry.tasks.setIssueLoop(String(args.key), args.loop ? String(args.loop) : null);
         case "project.set_ship_mode":
           return store.setShipMode(Number(args.id ?? store.projectByKey(String(args.project))?.id), args.mode);
         case "feature.prepare_ship":

@@ -9,6 +9,13 @@ export interface Change {
 
 export const CHANGES: Change[] = [
   {
+    version: "0.5.0",
+    notes: [
+      "Task loops for each kind of work: backend, frontend, bugfix (reproduce the bug with a test first) and docs (no project checks, only the task's own). The project manager picks one for each task; change it on the proposed task list, or on a task that isn't running. Set the project's default loop on the project page.",
+      "Your own loops: a .foundry/loops/<name>.yaml file on base adds a loop with the same steps and rules as the built-ins. A file that doesn't validate is listed on the project page with what's wrong.",
+    ],
+  },
+  {
     version: "0.4.0",
     notes: [
       "Ship by GitHub pull request: Prepare pushes the feature branch and opens a PR with gh when the repo has a remote. Foundry checks the PR every 5 minutes, moves the feature to Done when it merges, and verifies again when new commits arrive. Projects you already had keep merging locally; change it on the project page.",
