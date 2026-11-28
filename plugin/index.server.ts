@@ -1,6 +1,6 @@
 // Foundry's server entry: wires the store, the Paseo adapter, settings, hooks and plugin RPC.
-import { readFileSync, readdirSync, existsSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync, readdirSync, existsSync, rmSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { homedir, tmpdir } from "node:os";
 import { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import type { PluginServerContext, PluginHandlerContext } from "@getpaseo/plugin/server";
@@ -80,7 +80,11 @@ export default function contribute(server: PluginServerContext) {
   const removeHooks = adapter.install(foundry, buildTools(foundry), (p) => attach(p, "hook"));
 
   const handle = server.handle.bind(server) as (c: unknown, h: (i: any, ctx: PluginHandlerContext) => unknown) => void;
+  // Set once you delete Foundry's data before uninstalling: from then on Foundry only says so.
+  let deleted: string | null = null;
   const withSdk = <I, O>(fn: (input: I) => Promise<O> | O) => async (input: I, ctx: PluginHandlerContext) => {
+    if (deleted)
+      return { deleted, error: { code: "DATA_DELETED", message: `Foundry's data was deleted. Uninstall Foundry in Paseo's settings, or reload it to start fresh.` } };
     attach(ctx.paseo, "rpc");
     try {
       return await fn(input);
@@ -145,6 +149,28 @@ export default function contribute(server: PluginServerContext) {
           return foundry.harnesses();
         case "setup.create_profiles":
           return foundry.createProfiles(Array.isArray(args.choices) ? args.choices : []);
+        case "uninstall.leftovers":
+          return foundry.leftovers();
+        case "uninstall.stop_work":
+          return foundry.stopAllWork();
+        case "uninstall.remove_profiles":
+          return foundry.removeOwnProfiles(Array.isArray(args.ids) ? args.ids.map(String) : []);
+        case "uninstall.delete_data": {
+          // Typed confirmation: the data folder's name. A final copy is kept beside the folder unless you say not to.
+          if (args.confirm !== basename(home))
+            throw new FoundryError("CONFIRM_REQUIRED", `Type ${basename(home)} to confirm deleting Foundry's data in ${home}.`);
+          let backup: string | null = null;
+          if (args.keepBackup !== false) {
+            const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\..*/, "");
+            backup = join(dirname(home), `${basename(home)}-final-backup-${stamp}.db`);
+            store.copyTo(backup);
+          }
+          foundry.stop();
+          store.close();
+          rmSync(home, { recursive: true, force: true });
+          deleted = home;
+          return { deleted: home, backup };
+        }
         case "dev.reset_plan":
           if (!devMode) throw new FoundryError("UNKNOWN_ACTION", `Unknown action ${action}`);
           return foundry.devResetPlan();

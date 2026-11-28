@@ -1,6 +1,9 @@
 // Foundry's runtime: owns the store and the host, and answers host events. Loop 1, loop 2 and the PM
 // plug in here as they land; the foundations only record what happens and run the setup check.
+import { readdirSync, statSync } from "node:fs";
+import { join } from "node:path";
 import { ensureIntegration } from "./features";
+import { git } from "./git";
 import type { Host, ProfileChoice } from "./host";
 import { Locks } from "./locks";
 import { FoundryError, type Actor } from "./model";
@@ -149,6 +152,62 @@ export class Foundry {
     return [...ids];
   }
 
+  // ---------- before you uninstall ----------
+  /** Everything Foundry left behind, for Settings → Foundry and scripts/uninstall-local.sh. */
+  async leftovers() {
+    const facts = await this.host.facts();
+    const current = new Map((facts.profiles ?? []).map((p) => [p.id, p]));
+    const profiles = this.store
+      .owned()
+      .filter((o) => o.kind === "profile")
+      .map((o) => {
+        const now = current.get(o.id);
+        const was = JSON.parse(o.value) as Record<string, unknown>;
+        const state = !now ? "gone" : sameProfile(now as unknown as Record<string, unknown>, was) ? "unedited" : "edited";
+        return { id: o.id, state, model: (now?.model ?? was.model ?? null) as string | null };
+      });
+    const providers = this.store.owned().filter((o) => o.kind === "provider").map((o) => o.id);
+    const branches: { project: string; repo: string; branches: string[] }[] = [];
+    for (const p of this.store.projects()) {
+      const out = await git(p.repo, "branch", "--list", "--format=%(refname:short)", "foundry/*").catch(() => "");
+      const list = out.split("\n").map((x) => x.trim()).filter(Boolean);
+      if (list.length) branches.push({ project: p.key, repo: p.repo, branches: list });
+    }
+    return {
+      workspaces: this.foundryWorkspaces(),
+      profiles,
+      providers,
+      branches,
+      data: { home: this.cfg.home, files: dataFiles(this.cfg.home) },
+    };
+  }
+
+  /** Stops Foundry's agents and archives its Paseo workspaces (Paseo removes their worktrees). */
+  async stopAllWork() {
+    this.stop();
+    const archived: string[] = [];
+    const failed: string[] = [];
+    for (const id of this.foundryWorkspaces()) {
+      await this.host.archiveWorkspace(id).then(() => archived.push(id), () => failed.push(id));
+    }
+    this.store.event("work_stopped", { actor: "you", detail: { archived, failed } });
+    return { archived, failed };
+  }
+
+  /** Removes the profiles Foundry created that nobody has edited since. Edited ones are refused. */
+  async removeOwnProfiles(ids: string[]) {
+    const left = await this.leftovers();
+    const edited = left.profiles.filter((p) => ids.includes(p.id) && p.state === "edited").map((p) => p.id);
+    if (edited.length) throw new FoundryError("PROFILE_EDITED", `These profiles were changed after Foundry created them, so Foundry leaves them: ${edited.join(", ")}. Remove them in Paseo's settings if you want them gone.`);
+    const mine = left.profiles.filter((p) => ids.includes(p.id) && p.state === "unedited").map((p) => p.id);
+    const removed = await this.host.removeProfiles(mine);
+    this.store.tx(() => {
+      for (const p of left.profiles) if (ids.includes(p.id) && (removed.includes(p.id) || p.state === "gone")) this.store.removeOwned("profile", p.id);
+    });
+    this.store.event("profiles_removed", { actor: "you", detail: { removed } });
+    return { removed, setup: await this.runSetupCheck() };
+  }
+
   /** Development only: what a reset would remove. */
   async devResetPlan() {
     const facts = await this.host.facts();
@@ -249,5 +308,19 @@ export class Foundry {
     const a = this.store.agent(agentId);
     if (a?.role !== "builder") return null;
     return this.tasks.askNative(agentId, text).catch(() => null);
+  }
+}
+
+const PROFILE_KEYS = ["id", "name", "provider", "model"] as const;
+/** A profile is unedited while the fields Foundry wrote are as it wrote them. */
+function sameProfile(now: Record<string, unknown>, was: Record<string, unknown>) {
+  return PROFILE_KEYS.every((k) => (now[k] ?? null) === (was[k] ?? null)) && Object.keys(now).every((k) => (PROFILE_KEYS as readonly string[]).includes(k) || now[k] == null);
+}
+
+function dataFiles(home: string): { name: string; bytes: number }[] {
+  try {
+    return readdirSync(home).map((name) => ({ name, bytes: statSync(join(home, name)).size }));
+  } catch {
+    return [];
   }
 }

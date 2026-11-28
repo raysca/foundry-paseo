@@ -30,6 +30,7 @@ function Home({ projectKey }: { projectKey?: string }) {
   const q = useFoundry();
   if (!q.data) return q.error ? <Page><T>Foundry isn't reachable: {String(q.error)}</T></Page> : <Loading />;
   const s = q.data;
+  if (s.deleted) return <DataDeleted home={s.deleted} />;
   if (s.safe_mode) return <SafeMode info={s.safe_mode} />;
   const project = s.projects.find((p) => p.key === projectKey);
   if (!project) return <Page crumbs={[{ label: "Foundry", onPress: () => go(SCREEN.home) }]}><T>No Foundry project {projectKey}.</T></Page>;
@@ -152,6 +153,7 @@ function Projects({ hostId }: { hostId: string }) {
   const refs = useProjects({ hosts: [hostId], where: (p) => p.kind === "git", orderBy: "displayName" });
   if (!q.data) return q.error ? <Page><T>Foundry isn't reachable: {String(q.error)}</T></Page> : <Loading />;
   const s = q.data;
+  if (s.deleted) return <DataDeleted home={s.deleted} />;
   if (s.safe_mode) return <SafeMode info={s.safe_mode} />;
   const ob = s.onboarding;
   const profilesMissing = (s.setup?.findings ?? []).some((f: any) => f.code === "PROFILE_MISSING");
@@ -354,6 +356,17 @@ function WhatsNew({ ob }: { ob: any }) {
         </Row>
       ) : null}
     </Card>
+  );
+}
+
+function DataDeleted({ home }: { home: string }) {
+  return (
+    <Page crumbs={[{ label: "Foundry" }]}>
+      <Card>
+        <T bold>Foundry's data was deleted.</T>
+        <T size={13}>{home} is gone. Uninstall Foundry in Paseo's plugin settings, or reload it there to start fresh.</T>
+      </Card>
+    </Page>
   );
 }
 
