@@ -104,7 +104,7 @@ export function buildTools(f: Foundry): ToolSet {
     name: "propose_tasks",
     title: "Propose the task graph",
     description:
-      "Hand Foundry the feature's task graph. Foundry validates it (coverage of every requirement, no cycles, valid dependencies), writes tasks.md and returns waves, the critical path and warnings. Errors come back to fix; nothing is recorded until it passes. After a spec change, the same tool takes the change set: every existing task by issue key with a tag (keep, update, flag, cancel), plus new tasks by ref (new, followup, removal).",
+      "Hand Foundry the feature's task graph. Foundry validates it (coverage of every requirement, no cycles, valid dependencies), writes tasks.md and returns waves, the critical path, the slices and warnings. A bigger feature groups its tasks into slices that ship in order, each as its own PR (slices, and a slice number per task). Errors come back to fix; nothing is recorded until it passes. After a spec change, the same tool takes the change set: every existing task by issue key with a tag (keep, update, flag, cancel), plus new tasks by ref (new, followup, removal).",
     input: z.object({
       tasks: z.array(
         z.object({
@@ -122,13 +122,16 @@ export function buildTools(f: Foundry): ToolSet {
           // Change sets (after a spec change): the existing issue an entry is about, and what happens to it.
           issue: z.string().optional(),
           tag: z.enum(["keep", "update", "flag", "cancel", "new", "followup", "removal"]).optional(),
+          // The slice (1, 2, ...) the task ships in; leave out for a one-slice feature.
+          slice: z.number().int().min(1).optional(),
         }),
       ),
+      slices: z.array(z.object({ n: z.number().int().min(1), title: z.string(), goal: z.string().optional() })).optional(),
     }),
-    async execute({ tasks }, { agent }) {
+    async execute({ tasks, slices }, { agent }) {
       try {
         guardRole(f, agent.id, "planner");
-        return ok(f.planning.proposeTasks(agent.id, tasks));
+        return ok(f.planning.proposeTasks(agent.id, tasks, slices ?? []));
       } catch (e) {
         return refusal(e);
       }

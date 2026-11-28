@@ -436,16 +436,39 @@ function Proposal({ s, f }: { s: State; f: any }) {
   const result = parseJson<any>(p.result, {});
   const cut = parseJson<string[]>(p.cut, []);
   const change = p.kind === "change";
+  const editable = !change && f.stage === "tasks";
+  // The task list grouped by slice, in merge order (a change set is one list).
+  const declared = parseJson<any[]>(p.slices, []);
+  const slices: any[] = change ? [] : declared.length ? [...declared].sort((a, b) => a.n - b.n) : [{ n: 1, title: f.title }];
+  const groups = change ? [{ sl: null as any, list: tasks }] : slices.map((sl) => ({ sl, list: tasks.filter((t) => (t.slice ?? 1) === sl.n) }));
   return (
     <Section title={change ? "Change set (approve it on the task list)" : "Proposed tasks (approve them on the task list)"}>
       {(result.warnings ?? []).map((w: string, i: number) => (
         <T key={i} size={13}>⚠ {w}</T>
       ))}
-      {tasks.map((t, i) => {
+      {groups.map(({ sl, list }) => (
+        <View key={sl?.n ?? 0} style={{ gap: 8 }}>
+          {sl && slices.length > 1 ? (
+            <Card>
+              <Row wrap>
+                <Badge label={`Slice ${sl.n} of ${slices.length}`} tone="info" />
+                <T bold>{sl.title}</T>
+                <T muted size={12}>{sl.n === 1 ? "merges first" : `merges after slice ${sl.n - 1}`}</T>
+              </Row>
+              {sl.goal ? <T muted size={13}>{sl.goal}</T> : null}
+              {editable ? (
+                <Row wrap>
+                  {sl.n > 1 ? <Btn label="Move earlier" onPress={() => void act.run("feature.edit_slices", { id: f.id, op: { kind: "move_slice", from: sl.n, to: sl.n - 1 } })} /> : null}
+                  {sl.n > 1 ? <Btn label={`Merge into slice ${sl.n - 1}`} onPress={() => void act.run("feature.edit_slices", { id: f.id, op: { kind: "merge", from: sl.n, into: sl.n - 1 } })} /> : null}
+                </Row>
+              ) : null}
+            </Card>
+          ) : null}
+      {list.map((t, i) => {
         const id = t.issue ?? t.ref;
         const isCut = cut.includes(t.ref);
         return (
-          <Card key={i} style={{ opacity: isCut ? 0.5 : 1 }}>
+          <Card key={i} style={{ opacity: isCut ? 0.5 : 1, marginLeft: slices.length > 1 ? 16 : 0 }}>
             <Row wrap>
               {t.tag ? <Badge label={t.tag} tone={TAG_TONE[t.tag]} /> : null}
               <T bold>{id}</T>
@@ -458,22 +481,45 @@ function Proposal({ s, f }: { s: State; f: any }) {
               {(t.requirement_refs ?? []).length ? `Covers ${(t.requirement_refs ?? []).join(", ")}` : ""}
               {(t.depends_on ?? []).length ? ` · after ${(t.depends_on ?? []).map((d: any) => d.ref).join(", ")}` : ""}
             </T>
-            {!change && f.stage === "tasks" ? (
-              <Row><Btn label={isCut ? "Put back" : "Cut"} onPress={() => void act.run("feature.cut_task", { id: f.id, ref: t.ref, cut: !isCut })} /></Row>
+            {editable ? (
+              <Row wrap>
+                <Btn label={isCut ? "Put back" : "Cut"} onPress={() => void act.run("feature.cut_task", { id: f.id, ref: t.ref, cut: !isCut })} />
+                {[...slices.map((x) => x.n), slices.length + 1]
+                  .filter((n) => n !== (t.slice ?? 1))
+                  .map((n) => (
+                    <Btn key={n} label={n > slices.length ? "Move to a new slice" : `Move to slice ${n}`} onPress={() => void act.run("feature.edit_slices", { id: f.id, op: { kind: "move_task", ref: t.ref, slice: n } })} />
+                  ))}
+              </Row>
             ) : null}
           </Card>
         );
       })}
+        </View>
+      ))}
     </Section>
   );
 }
 
+const SLICE_STATUS: Record<string, string> = { planned: "Planned", building: "Building", verify: "Verify", ship: "Ship", shipped: "Shipped", cancelled: "Cancelled" };
+
 function Tasks({ s, f }: { s: State; f: any }) {
   const issues = s.issues.filter((i) => i.feature_id === f.id);
   if (!issues.length) return null;
+  const slices = (s.slices ?? []).filter((x: any) => x.feature_id === f.id);
+  // One group per slice, in merge order; tasks with no slice (from before slices) form one group.
+  const groups = slices.length > 1 ? slices.map((sl: any) => ({ sl, list: issues.filter((i) => i.slice_id === sl.id) })) : [{ sl: null as any, list: issues }];
   return (
     <Section title={`Tasks (${issues.length})`}>
-      {issues.map((i) => (
+      {groups.map(({ sl, list }) => (
+        <View key={sl?.id ?? 0} style={{ gap: 8 }}>
+          {sl ? (
+            <Row wrap>
+              <Badge label={`Slice ${sl.n} of ${slices.length}`} tone={sl.status === "shipped" ? "success" : sl.status === "planned" ? "muted" : "info"} />
+              <T bold>{sl.title}</T>
+              <T muted size={12}>{SLICE_STATUS[sl.status] ?? sl.status} · {list.filter((i) => i.status === "Done").length} of {list.length} done · {sl.n === 1 ? "merges first" : `merges after slice ${sl.n - 1}`}</T>
+            </Row>
+          ) : null}
+      {list.map((i) => (
         <Card key={i.key} onPress={() => go(SCREEN.issue, { key: i.key })}>
           <Row wrap>
             <T bold>{i.key}</T>
@@ -484,6 +530,8 @@ function Tasks({ s, f }: { s: State; f: any }) {
           </Row>
           {i.reason ? <T muted size={12}>{i.reason}</T> : null}
         </Card>
+      ))}
+        </View>
       ))}
     </Section>
   );

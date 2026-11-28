@@ -69,6 +69,27 @@ export interface Feature {
   updated_at: string;
 }
 
+export type SliceStatus = "planned" | "building" | "verify" | "ship" | "shipped" | "cancelled";
+
+export interface Slice {
+  id: number;
+  feature_id: number;
+  /** Its place in the merge order: 1 merges first. */
+  n: number;
+  title: string;
+  goal: string;
+  requirement_refs: string; // JSON string[]
+  status: SliceStatus;
+  branch: string | null;
+  workspace_id: string | null;
+  path: string | null;
+  head_sha: string | null;
+  pr: string | null;
+  shipped_sha: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface FeatureDoc {
   feature_id: number;
   kind: DocKind;
@@ -105,6 +126,8 @@ export interface Issue {
   profile: string | null;
   max_fix_rounds: number | null;
   flag: string | null;
+  /** The slice of its feature it ships in (null for quick tasks). */
+  slice_id: number | null;
   created_at: string;
   updated_at: string;
 }
@@ -216,6 +239,7 @@ export interface TaskProposal {
   status: "proposed" | "superseded" | "approved";
   result: string; // JSON: waves, critical path, warnings
   cut: string; // JSON string[] of cut refs
+  slices: string; // JSON ProposedSlice[] (as the PM proposed them, then as you edited them)
   created_at: string;
 }
 
@@ -416,6 +440,26 @@ export const MIGRATIONS: readonly string[] = [
    UPDATE projects SET ship_mode='local_merge';`,
   // 12: which delivery a feature is on. A Done feature whose spec you edit reopens on a new branch (round 2, 3, ...).
   `ALTER TABLE features ADD COLUMN round INTEGER NOT NULL DEFAULT 1;`,
+  // 13: slices. A feature ships as an ordered chain of slices, each a group of its tasks with its own
+  // Verify and PR. Every feature that already has tasks becomes a one-slice feature on its own branch.
+  `CREATE TABLE slices (
+     id INTEGER PRIMARY KEY, feature_id INTEGER NOT NULL REFERENCES features(id), n INTEGER NOT NULL,
+     title TEXT NOT NULL, goal TEXT NOT NULL DEFAULT '', requirement_refs TEXT NOT NULL DEFAULT '[]',
+     status TEXT NOT NULL DEFAULT 'planned', branch TEXT, workspace_id TEXT, path TEXT, head_sha TEXT,
+     pr TEXT, shipped_sha TEXT,
+     created_at TEXT NOT NULL DEFAULT (datetime('now')), updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+     UNIQUE(feature_id, n));
+   ALTER TABLE issues ADD COLUMN slice_id INTEGER REFERENCES slices(id);
+   ALTER TABLE verifications ADD COLUMN slice_id INTEGER REFERENCES slices(id);
+   ALTER TABLE task_proposals ADD COLUMN slices TEXT NOT NULL DEFAULT '[]';
+   INSERT INTO slices(feature_id,n,title,requirement_refs,status,branch,workspace_id,path,head_sha)
+     SELECT f.id, 1, f.title,
+       COALESCE((SELECT json_group_array(r.ref) FROM requirements r WHERE r.feature_id=f.id AND r.retired=0), '[]'),
+       CASE WHEN f.status='cancelled' THEN 'cancelled' WHEN f.stage='done' THEN 'shipped' WHEN f.stage IN ('verify','ship') THEN f.stage ELSE 'building' END,
+       f.branch, f.integration_workspace_id, f.integration_path, f.head_sha
+     FROM features f WHERE EXISTS (SELECT 1 FROM issues i WHERE i.feature_id=f.id);
+   UPDATE issues SET slice_id=(SELECT s.id FROM slices s WHERE s.feature_id=issues.feature_id AND s.n=1) WHERE feature_id IS NOT NULL;
+   UPDATE verifications SET slice_id=(SELECT s.id FROM slices s WHERE s.feature_id=verifications.feature_id AND s.n=1);`,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
@@ -705,6 +749,12 @@ export class Store {
     const f = this.feature(id)!;
     if (f.stage === stage) return;
     this.updateFeature(id, { stage });
+    // The slice at the front of the merge order follows the feature through Build, Verify and Ship;
+    // Done ships every slice. (Per-slice Build, Verify and Ship replace this.)
+    const front = this.get<Slice>("SELECT * FROM slices WHERE feature_id=? AND status NOT IN ('shipped','cancelled') ORDER BY n LIMIT 1", id);
+    const map: Partial<Record<FeatureStage, SliceStatus>> = { build: "building", verify: "verify", ship: "ship" };
+    if (stage === "done") this.run("UPDATE slices SET status='shipped', shipped_sha=COALESCE(shipped_sha, ?), updated_at=datetime('now') WHERE feature_id=? AND status NOT IN ('shipped','cancelled')", f.head_sha, id);
+    else if (front && map[stage]) this.updateSlice(front.id, { status: map[stage]! });
     this.event("stage_changed", { actor, project: f.project_id, feature: id, detail: { from: f.stage, to: stage } });
   }
   doc(featureId: number, kind: DocKind) {
@@ -772,10 +822,32 @@ export class Store {
   proposals(featureId: number) {
     return this.all<TaskProposal>("SELECT * FROM task_proposals WHERE feature_id=? ORDER BY id", featureId);
   }
-  addProposal(featureId: number, tasks: unknown, result: unknown, kind: "initial" | "change" = "initial"): TaskProposal {
+  // ---------- slices ----------
+  slices(featureId: number) {
+    return this.all<Slice>("SELECT * FROM slices WHERE feature_id=? ORDER BY n", featureId);
+  }
+  slice(id: number) {
+    return this.get<Slice>("SELECT * FROM slices WHERE id=?", id);
+  }
+  /** The slice new tasks of a feature join when nothing names one: the last slice that hasn't shipped. */
+  openSlice(featureId: number) {
+    return this.get<Slice>("SELECT * FROM slices WHERE feature_id=? AND status NOT IN ('shipped','cancelled') ORDER BY n DESC LIMIT 1", featureId);
+  }
+  addSlice(featureId: number, s: { n: number; title: string; goal?: string; requirementRefs?: string[]; status?: SliceStatus; branch?: string | null; workspaceId?: string | null; path?: string | null; headSha?: string | null }): Slice {
+    const r = this.run(
+      "INSERT INTO slices(feature_id,n,title,goal,requirement_refs,status,branch,workspace_id,path,head_sha) VALUES(?,?,?,?,?,?,?,?,?,?)",
+      featureId, s.n, s.title, s.goal ?? "", json(s.requirementRefs ?? []), s.status ?? "planned", s.branch ?? null, s.workspaceId ?? null, s.path ?? null, s.headSha ?? null,
+    );
+    return this.slice(Number(r.lastInsertRowid))!;
+  }
+  updateSlice(id: number, patch: Partial<Omit<Slice, "id" | "feature_id" | "created_at">>) {
+    this.patch("slices", "id", id, { ...patch, updated_at: new Date().toISOString() });
+  }
+
+  addProposal(featureId: number, tasks: unknown, result: unknown, kind: "initial" | "change" = "initial", slices: unknown = []): TaskProposal {
     return this.tx(() => {
       this.run("UPDATE task_proposals SET status='superseded' WHERE feature_id=? AND status='proposed'", featureId);
-      const r = this.run("INSERT INTO task_proposals(feature_id,kind,tasks,result) VALUES(?,?,?,?)", featureId, kind, json(tasks), json(result));
+      const r = this.run("INSERT INTO task_proposals(feature_id,kind,tasks,result,slices) VALUES(?,?,?,?,?)", featureId, kind, json(tasks), json(result), json(slices));
       return this.get<TaskProposal>("SELECT * FROM task_proposals WHERE id=?", Number(r.lastInsertRowid))!;
     });
   }
@@ -805,13 +877,14 @@ export class Store {
     touches?: string[];
     requirementRefs?: string[];
     profile?: string | null;
+    sliceId?: number | null;
     actor?: Actor;
   }): Issue {
     return this.tx(() => {
       const key = this.nextIssueKey(i.projectId);
       this.run(
-        `INSERT INTO issues(key,project_id,feature_id,origin,title,description,acceptance,status,priority,size,loop,checks,touches,requirement_refs,profile)
-         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        `INSERT INTO issues(key,project_id,feature_id,origin,title,description,acceptance,status,priority,size,loop,checks,touches,requirement_refs,profile,slice_id)
+         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         key,
         i.projectId,
         i.featureId ?? null,
@@ -827,6 +900,7 @@ export class Store {
         json(i.touches ?? []),
         json(i.requirementRefs ?? []),
         i.profile ?? null,
+        i.sliceId ?? null,
       );
       this.event("issue_created", { actor: i.actor ?? "system", project: i.projectId, feature: i.featureId ?? null, issue: key, detail: { status: i.status, origin: i.origin } });
       return this.issue(key)!;

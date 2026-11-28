@@ -36,10 +36,13 @@ function Issue({ issueKey, openAgent }: { issueKey: string; openAgent?: (agentId
   const p = s.projects.find((x) => x.id === i.project_id)!;
   const f = i.feature_id ? s.features.find((x) => x.id === i.feature_id) : null;
   const r = review.data && !review.data.error ? review.data : null;
+  const sl = i.slice_id ? (s.slices ?? []).find((x: any) => x.id === i.slice_id) : null;
+  const sliceCount = f ? (s.slices ?? []).filter((x: any) => x.feature_id === f.id).length : 0;
   const crumbs = [
     { label: "Foundry", onPress: () => go(SCREEN.home, { project: p.key }) },
     { label: p.name, onPress: () => go(SCREEN.home, { project: p.key }) },
     ...(f ? [{ label: f.title, onPress: () => go(SCREEN.feature, { id: String(f.id) }) }] : []),
+    ...(sl && sliceCount > 1 ? [{ label: `Slice ${sl.n}: ${sl.title}`, onPress: () => go(SCREEN.feature, { id: String(f!.id) }) }] : []),
     { label: i.key },
   ];
   return (

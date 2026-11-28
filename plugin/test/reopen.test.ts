@@ -151,6 +151,11 @@ test("editing a Done feature's spec reopens it on a new branch from base; only t
   const applied = await h.approveChange();
   assert.deepEqual(applied, { "SHT-1": "keep", "SHT-2": "keep", "SHT-3": "new" });
   assert.ok(host.archived.includes(before.ws));
+  // Reopening appends a slice: the shipped one stays shipped, the delta builds in slice 2 on the new branch.
+  const sl = store.slices(fid);
+  assert.deepEqual(sl.map((x) => [x.n, x.status]), [[1, "shipped"], [2, "building"]]);
+  assert.equal(sl[1]!.branch, "shout-mode-r2");
+  assert.equal(store.issue("SHT-3")!.slice_id, sl[1]!.id);
   await h.accept("SHT-3");
   f = store.feature(fid)!;
   assert.equal(f.stage, "ship", "Build, then Verify, on the new branch");

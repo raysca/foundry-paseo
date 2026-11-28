@@ -111,6 +111,7 @@ export default function contribute(server: PluginServerContext) {
       docs: store.all("SELECT * FROM feature_docs ORDER BY feature_id, kind"),
       requirements: store.all("SELECT * FROM requirements WHERE retired=0 ORDER BY feature_id, ref"),
       proposals: store.all("SELECT * FROM task_proposals WHERE status IN ('proposed','approved') ORDER BY id DESC LIMIT 50"),
+      slices: store.all("SELECT * FROM slices ORDER BY feature_id, n"),
       questions: store.all("SELECT * FROM questions WHERE status IN ('live','waiting') ORDER BY id"),
       verifications: store.all("SELECT * FROM verifications WHERE id IN (SELECT MAX(id) FROM verifications GROUP BY feature_id)"),
       chat: store.all("SELECT * FROM (SELECT * FROM chat ORDER BY id DESC LIMIT 300) ORDER BY id"),
@@ -219,6 +220,8 @@ export default function contribute(server: PluginServerContext) {
           return foundry.planning.approvePlan(Number(args.id), String(args.sha));
         case "feature.approve_tasks":
           return foundry.planning.approveTasks(Number(args.id), Number(args.proposal), String(args.sha), "you", { spec: args.spec_sha, plan: args.plan_sha });
+        case "feature.edit_slices":
+          return foundry.planning.editSlices(Number(args.id), args.op);
         case "feature.cut_task":
           return foundry.planning.cutTask(Number(args.id), String(args.ref), args.cut !== false);
         case "feature.revise":

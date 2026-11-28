@@ -284,7 +284,7 @@ export class Delivery {
       if (unknown.length) throw new FoundryError("TASKS_INVALID", `Not requirements of this feature: ${unknown.join(", ")}`);
       return this.store.tx(() => {
         // Nothing depends on it, so its critical-path priority is the base priority.
-        const i = this.store.createIssue({ projectId: f.project_id, featureId: f.id, origin: "feature", title, description, status: "Ready", priority: 50, requirementRefs, actor });
+        const i = this.store.createIssue({ projectId: f.project_id, featureId: f.id, origin: "feature", title, description, status: "Ready", priority: 50, requirementRefs, sliceId: this.store.openSlice(f.id)?.id ?? null, actor });
         this.store.setStage(f.id, "build", actor);
         this.store.event("task_from_verify", { actor, project: f.project_id, feature: f.id, issue: i.key });
         return i.key;

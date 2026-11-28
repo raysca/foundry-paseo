@@ -23,6 +23,8 @@ export interface FeatureRow {
     split: { done: number; in_review: number; in_progress: number; waiting: number; not_started: number; failed_or_blocked: number };
   };
   coverage: { covered: number; total: number };
+  /** The feature's chain of slices: how many, and which is next to merge. */
+  slices: { total: number; front: number | null; front_title: string | null };
   waiting_on_you: number;
   planning_error: string | null;
   updated_at: string;
@@ -82,6 +84,7 @@ export function featureRow(store: Store, f: Feature): FeatureRow {
     coverage: { covered, total: reqs.length },
     waiting_on_you: split.in_review + split.waiting + questions + docsInReview + (f.planning_error ? 1 : 0) + (delivery.waiting ? 1 : 0),
     planning_error: f.planning_error,
+    slices: sliceInfo(store, f.id),
     updated_at: f.updated_at,
   };
 }
@@ -130,4 +133,11 @@ export function featuresOverview(store: Store, projectId?: number) {
     buckets: { pending: count("pending"), in_progress: count("in_progress"), completed: count("completed") },
     rows,
   };
+}
+
+/** Where a feature is in its chain of slices: the front slice (the next to merge) of how many. */
+function sliceInfo(store: Store, featureId: number) {
+  const all = store.slices(featureId).filter((x) => x.status !== "cancelled");
+  const front = all.find((x) => x.status !== "shipped");
+  return { total: all.length, front: front?.n ?? null, front_title: front?.title ?? null };
 }

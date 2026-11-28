@@ -15,6 +15,7 @@ export const CHANGES: Change[] = [
       "Edit the spec of a feature in Verify, Ship or Done. In Verify or Ship, approving the change set sends the feature back to Build when tasks changed, or straight to Verify. A Done feature reopens on a new branch from base (shout-mode-r2), and only what changed becomes new tasks.",
       "A task the spec changed under is flagged at review: accept it as is, rework it with a drafted message naming the new requirements, or cancel it.",
       "Filter the features list by bucket, status and spec changed.",
+      "Slices: the project manager can group a bigger feature's tasks into slices that ship in order. The task list shows them, and you can move tasks between slices, reorder them or merge them before you approve. A slice or feature over the size budget gets a warning. Features you already have become one-slice features.",
     ],
   },
   {

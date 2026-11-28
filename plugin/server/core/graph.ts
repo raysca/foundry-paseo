@@ -1,5 +1,5 @@
 // Loop 1 validation that needs no LLM: EARS acceptance criteria and the task graph the PM proposes.
-import { FoundryError, type Size } from "./model";
+import { FoundryError, SIZE_WEIGHT, type Size } from "./model";
 
 // ---------- requirements ----------
 
@@ -60,6 +60,71 @@ export interface ProposedTask {
   /** Change sets only: the existing issue this entry is about, and what happens to it. */
   issue?: string;
   tag?: ChangeTag;
+  /** The slice (1, 2, ...) this task ships in; absent means slice 1. */
+  slice?: number;
+}
+
+// ---------- slices ----------
+
+/** A group of a feature's tasks that is built, verified and shipped together as one PR, in order. */
+export interface ProposedSlice {
+  n: number;
+  title: string;
+  goal?: string;
+}
+
+/** A slice as validated: its requirements are the ones its tasks finish (the last slice covering each). */
+export interface SliceResult extends ProposedSlice {
+  requirement_refs: string[];
+  tasks: string[];
+  weight: number;
+}
+
+/** Plan smaller: a slice or a feature over these gets a warning (sizes weigh S=1, M=2, L=3, unsized M). */
+export const SLICE_BUDGET = { tasks: 8, weight: 12, featureSlices: 4, featureTasks: 25 };
+export const sizeWeight = (s?: string | null) => SIZE_WEIGHT[(s ?? "M") as Size] ?? SIZE_WEIGHT.M;
+
+/**
+ * Validate the slices of a task graph (live tasks only). A task without a slice is in slice 1; no
+ * slices at all means one slice named after the feature. Slices are numbered 1..k with no gaps, each
+ * holds at least one task, and no task depends on a task in a later slice. A requirement belongs to the
+ * last slice that has a task covering it: that is when it ships. Throws SLICE_INVALID with every error.
+ */
+export function validateSlices(title: string, slices: ProposedSlice[] | undefined, tasks: ProposedTask[], cut: string[] = []): { slices: SliceResult[]; warnings: string[] } {
+  const errors: string[] = [];
+  const live = tasks.filter((t) => !cut.includes(t.ref) && !t.issue);
+  const declared = slices?.length ? [...slices].sort((a, b) => a.n - b.n) : [{ n: 1, title }];
+  declared.forEach((sl, i) => {
+    if (sl.n !== i + 1) errors.push(`Slices are numbered 1, 2, 3 … in merge order; found ${declared.map((x) => x.n).join(", ")}.`);
+    if (!sl.title?.trim()) errors.push(`Slice ${sl.n} needs a title.`);
+  });
+  const known = new Set(declared.map((x) => x.n));
+  const sliceOf = new Map(live.map((t) => [t.ref, t.slice ?? 1]));
+  for (const t of live) if (!known.has(sliceOf.get(t.ref)!)) errors.push(`${t.ref} is in slice ${t.slice}, which is not one of the slices.`);
+  const out: SliceResult[] = declared.map((sl) => ({ n: sl.n, title: sl.title, goal: sl.goal ?? "", requirement_refs: [], tasks: [], weight: 0 }));
+  for (const t of live) {
+    const sl = out.find((x) => x.n === sliceOf.get(t.ref));
+    if (!sl) continue;
+    sl.tasks.push(t.ref);
+    sl.weight += sizeWeight(t.size);
+  }
+  for (const sl of out) if (!sl.tasks.length) errors.push(`Slice ${sl.n} (${sl.title}) has no tasks.`);
+  for (const t of live)
+    for (const d of t.depends_on ?? []) {
+      const ds = sliceOf.get(d.ref);
+      if (ds !== undefined && ds > sliceOf.get(t.ref)!) errors.push(`${t.ref} (slice ${sliceOf.get(t.ref)}) depends on ${d.ref} in a later slice (${ds}); a slice only depends on itself and earlier slices.`);
+    }
+  const last = new Map<string, number>();
+  for (const t of live) for (const r of t.requirement_refs ?? []) last.set(r, Math.max(last.get(r) ?? 0, sliceOf.get(t.ref)!));
+  for (const [r, n] of last) out.find((x) => x.n === n)?.requirement_refs.push(r);
+  if (errors.length) throw new FoundryError("SLICE_INVALID", `The slices were not recorded. Fix and resend:\n- ${errors.join("\n- ")}`, { errors });
+  const warnings: string[] = [];
+  for (const sl of out)
+    if (sl.tasks.length > SLICE_BUDGET.tasks || sl.weight > SLICE_BUDGET.weight)
+      warnings.push(`Slice ${sl.n} (${sl.title}) is big: ${sl.tasks.length} tasks, size weight ${sl.weight} (budget ${SLICE_BUDGET.tasks} tasks or ${SLICE_BUDGET.weight}). Consider splitting it.`);
+  if (out.length > SLICE_BUDGET.featureSlices || live.length > SLICE_BUDGET.featureTasks)
+    warnings.push(`This feature is big: ${live.length} tasks in ${out.length} slices (budget ${SLICE_BUDGET.featureTasks} tasks or ${SLICE_BUDGET.featureSlices} slices). Consider splitting it into separate features.`);
+  return { slices: out, warnings };
 }
 
 export type ChangeTag = "keep" | "update" | "flag" | "cancel" | "new" | "followup" | "removal";
@@ -310,7 +375,7 @@ function findCycle(deps: Map<string, string[]>): string[] | null {
 }
 
 /** tasks.md, written by Foundry from the proposal (the PM never writes it). */
-export function renderTasks(title: string, tasks: ProposedTask[], g: GraphResult, cut: string[] = []): string {
+export function renderTasks(title: string, tasks: ProposedTask[], g: GraphResult, cut: string[] = [], slices: SliceResult[] = []): string {
   const byRef = new Map(tasks.map((t) => [t.ref, t]));
   const lines = [`# Tasks: ${title}`, "", "Written by Foundry from the PM's proposal. Edit tasks in Foundry, not here.", ""];
   const existing = tasks.filter((t) => t.issue);
@@ -319,16 +384,24 @@ export function renderTasks(title: string, tasks: ProposedTask[], g: GraphResult
     for (const t of existing) lines.push(`| ${t.issue} | ${t.tag} | ${(t.requirement_refs ?? []).join(", ")} |`);
     lines.push("");
   }
-  g.waves.forEach((w, i) => {
-    lines.push(`## Wave ${i + 1}`, "", "| Ref | Task | Covers | Depends on | Size | Checks |", "|---|---|---|---|---|---|");
-    for (const r of w) {
-      const t = byRef.get(r)!;
-      const dep = (t.depends_on ?? []).map((d) => `${d.ref}${d.reason ? ` (${d.reason})` : ""}`).join("; ");
-      const checks = [...(t.checks?.scripts ?? []), ...(t.checks?.paths ?? []).map((p) => `path ${p}`)].join(", ");
-      lines.push(`| ${r} | ${esc(t.title)} | ${(t.requirement_refs ?? []).join(", ")} | ${esc(dep)} | ${t.size ?? ""} | ${esc(checks)} |`);
+  const row = (r: string) => {
+    const t = byRef.get(r)!;
+    const dep = (t.depends_on ?? []).map((d) => `${d.ref}${d.reason ? ` (${d.reason})` : ""}`).join("; ");
+    const checks = [...(t.checks?.scripts ?? []), ...(t.checks?.paths ?? []).map((p) => `path ${p}`)].join(", ");
+    return `| ${r} | ${esc(t.title)} | ${(t.requirement_refs ?? []).join(", ")} | ${esc(dep)} | ${t.size ?? ""} | ${esc(checks)} |`;
+  };
+  const head = ["| Ref | Task | Covers | Depends on | Size | Checks |", "|---|---|---|---|---|---|"];
+  if (slices.length > 1)
+    // One section per slice, in merge order; inside it the slice's tasks by wave.
+    for (const sl of slices) {
+      lines.push(`## Slice ${sl.n}: ${sl.title}`, "", ...(sl.goal ? [sl.goal, ""] : []), `Delivers ${sl.requirement_refs.join(", ") || "no requirement of its own"}. Merges ${sl.n === 1 ? "first" : `after slice ${sl.n - 1}`}.`, "", ...head);
+      for (const w of g.waves) for (const r of w) if (sl.tasks.includes(r)) lines.push(row(r));
+      lines.push("");
     }
-    lines.push("");
-  });
+  else
+    g.waves.forEach((w, i) => {
+      lines.push(`## Wave ${i + 1}`, "", ...head, ...w.map(row), "");
+    });
   if (cut.length) lines.push("## Cut", "", ...cut.map((r) => `- ${r}: ${esc(byRef.get(r)?.title ?? "")}`), "");
   if (g.critical_path.length) lines.push(`Critical path: ${g.critical_path.join(" → ")}`, "");
   if (g.warnings.length) lines.push("## Warnings", "", ...g.warnings.map((w) => `- ${w}`), "");
