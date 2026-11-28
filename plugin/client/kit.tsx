@@ -42,6 +42,7 @@ export type State = Record<string, any> & {
   chat: any[];
   cards: any[];
   ships: { key: string; value: string }[];
+  holds?: { key: string; value: string }[];
   events: any[];
 };
 

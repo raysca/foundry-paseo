@@ -54,6 +54,8 @@ jobs:
         run: bash e2e/quick.sh
       - name: Ship by GitHub PR (a fake gh and a bare remote; PR opened, new commits re-verify, merged moves to Done)
         run: bash e2e/ship-pr.sh
+      - name: Slices exit test (three slices as stacked PRs, promoted and retargeted in order, a spec change mid-way)
+        run: bash e2e/slices.sh
       - name: M1 exit test (extended Shout scenario with a spec edit during Build, Verify and Ship)
         run: bash e2e/exit.sh
       - name: updating Foundry keeps its data (install-local.sh run twice over a project and feature)

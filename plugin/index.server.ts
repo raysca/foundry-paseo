@@ -118,6 +118,7 @@ export default function contribute(server: PluginServerContext) {
       cards: store.all("SELECT * FROM cards ORDER BY id DESC LIMIT 100"),
       pm_threads: store.all("SELECT project_id, thread, busy, last_turn_at FROM pm_threads"),
       ships: store.all("SELECT key, value FROM settings WHERE key LIKE 'ship:%' AND value<>''"),
+      holds: store.all("SELECT key, value FROM settings WHERE key LIKE 'slice_hold:%' AND value<>''"),
       events: store.events({ limit: 200 }),
       onboarding: install.status(),
       dev: devMode,

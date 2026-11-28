@@ -42,7 +42,7 @@ function fakeGitHub(repo: string) {
  * Shout mode in three slices: T1 (R1) in slice 1; T2 (R2, after T1) and T3 (docs, no dependency) in
  * slice 2; T4 (R3, after T2) in slice 3. Tasks start but are accepted by the test.
  */
-async function threeSlices(o: { mode: "pr" | "local_merge"; failOnce?: string }) {
+async function threeSlices(o: { mode: "pr" | "local_merge"; failOnce?: string; onChange?: (f: Foundry, agentId: string, prompt: string) => void }) {
   const repo = fixtureRepo();
   const gh = o.mode === "pr" ? fakeGitHub(repo) : null;
   const store = new Store(":memory:");
@@ -53,6 +53,8 @@ async function threeSlices(o: { mode: "pr" | "local_merge"; failOnce?: string })
   const dirOf = (t: Turn) => /Write only under (\S+)\//.exec(host.agents.get(t.agentId)!.messages[0]!)![1]!;
   host.behaviours.planner = (t) => {
     const dir = dirOf(t);
+    if (t.text.includes("approved a changed spec")) return o.onChange?.(foundry, t.agentId, t.text);
+    if (t.text.includes("The developer edited")) return void foundry.planning.proposeRequirements(t.agentId, [R("R1", "shout"), R("R2", "--shout"), R("R3", "--loud"), R("R4", "--quiet")]);
     if (t.text.includes("call propose_tasks with"))
       return void foundry.planning.proposeTasks(
         t.agentId,
@@ -236,4 +238,66 @@ test("local merge: a fix in the front merges forward into the next slice; shippi
   assert.equal(store.feature(fid)!.stage, "ship");
   assert.equal(status(), "1:shipped 2:ship 3:building");
   assert.deepEqual(parse<unknown>(store.setting(`ship:slice:${slice(2).id}`), null), null);
+});
+
+test("a spec change names slices: new work can't go in a shipped slice, a new slice joins the end, and slices in Ship are checked again", async () => {
+  const errors: string[] = [];
+  let prompt = "";
+  const { store, host, foundry, fid, settle, accept, slice, status, reported, k } = await threeSlices({
+    mode: "local_merge",
+    onChange: (f, agentId, text) => {
+      prompt = text;
+      const keep = store.issues({ featureId: fid }).map((i) => ({ ref: i.key, issue: i.key, tag: "keep" as const, title: "", requirement_refs: [] as string[] }));
+      for (const bad of [1, 6]) {
+        try {
+          f.planning.proposeTasks(agentId, [...keep, { ref: "N1", tag: "new", title: "Add --quiet", requirement_refs: ["R4"], slice: bad }]);
+        } catch (e) {
+          errors.push((e as FoundryError).code);
+        }
+      }
+      try {
+        // Slice 3's new task can't depend on one in slice 4.
+        f.planning.proposeTasks(agentId, [...keep, { ref: "N1", tag: "new", title: "Add --quiet", requirement_refs: ["R4"], slice: 4 }, { ref: "N2", tag: "new", title: "Test --quiet", requirement_refs: ["R4"], slice: 3, depends_on: [{ ref: "N1", reason: "tests it" }] }]);
+      } catch (e) {
+        errors.push((e as FoundryError).code);
+      }
+      f.planning.proposeTasks(agentId, [...keep, { ref: "N1", tag: "new", title: "Add --quiet", requirement_refs: ["R4"], slice: 4 }]);
+    },
+  });
+  await accept(k("Add shout()"));
+  await accept(k("Add --shout"));
+  await accept(k("Document --shout"));
+  const p1 = await foundry.delivery.prepare(fid, "you", slice(1).id);
+  await foundry.delivery.acceptShip(fid, p1.sha, p1.tree, { confirmCheckedOut: true });
+  await settle();
+  assert.equal(status(), "1:shipped 2:ship 3:building");
+
+  // Add R4 to the spec while slice 2 is in Ship and slice 3 builds.
+  const ff = store.feature(fid)!;
+  const text = readFileSync(join(ff.integration_path!, ".foundry/features", ff.slug, "spec.md"), "utf8");
+  await foundry.planning.editDoc(fid, "spec", text + "\nAlso --quiet.\n", store.doc(fid, "spec")!.head_sha!);
+  await host.idle();
+  await foundry.planning.approveSpec(fid, store.doc(fid, "spec")!.head_sha!);
+  await host.idle();
+  assert.match(prompt, /Slices, in merge order:\n- slice 1 "Shout core" \(shipped\)\n- slice 2 "CLI flag" \(ship\)\n- slice 3 "Loud alias" \(building\)/);
+  assert.match(prompt, /Add --loud \(slice 3; covers R3\)/);
+  assert.deepEqual(errors, ["SLICE_SHIPPED", "SLICE_INVALID", "SLICE_INVALID"]);
+
+  assert.match((await foundry.planning.readDoc(fid, "tasks")).text, /\| N1 \| Add --quiet \(slice 4\) \|/);
+  const before = reported.length;
+  await foundry.planning.approveTasks(fid, store.proposal(fid)!.id, store.doc(fid, "tasks")!.head_sha!);
+  await settle();
+  const n1 = store.issues({ featureId: fid }).find((i) => i.title === "Add --quiet")!;
+  assert.equal(store.slice(n1.slice_id!)!.n, 4);
+  assert.equal(slice(4).status, "planned");
+  assert.equal(n1.status, "Ready");
+  assert.equal(store.latestAttempt(n1.key), undefined, "slice 4 waits its turn");
+  // Slice 2 went back through Build (nothing to build) and was verified again against the new requirements.
+  assert.equal(reported.length, before + 1);
+  assert.deepEqual(reported.at(-1), ["R1", "R2"]);
+  assert.equal(status(), "1:shipped 2:ship 3:building 4:planned");
+  // Slice 3 still checks R1 to R3; R4 ships with slice 4.
+  await accept(k("Add --loud"));
+  assert.deepEqual(reported.at(-1), ["R1", "R2", "R3"]);
+  assert.equal(status(), "1:shipped 2:ship 3:ship 4:planned", "slice 4 waits: two are active");
 });

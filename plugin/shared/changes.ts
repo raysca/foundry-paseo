@@ -16,6 +16,7 @@ export const CHANGES: Change[] = [
       "A task the spec changed under is flagged at review: accept it as is, rework it with a drafted message naming the new requirements, or cancel it.",
       "Filter the features list by bucket, status and spec changed.",
       "Slices: the project manager can group a bigger feature's tasks into slices that ship in order. The task list shows them, and you can move tasks between slices, reorder them or merge them before you approve. A slice or feature over the size budget gets a warning. Features you already have become one-slice features.",
+      "Each slice builds, verifies and ships on its own: when a slice reaches Ship the next one starts building on top of it, its PR is stacked on the one before and retargeted at base when that merges, and the Merge order panel on the feature shows where every slice stands. A spec change puts new work in an open slice, or a new one at the end.",
     ],
   },
   {
