@@ -540,7 +540,10 @@ function Tasks({ s, f }: { s: State; f: any }) {
 function Delivery({ s, f }: { s: State; f: any }) {
   const act = useAct();
   const toast = useToast();
-  const v = s.verifications.find((x) => x.feature_id === f.id);
+  // This panel follows the front slice (the feature's own branch); slices behind it show in the merge order.
+  const front = (s.slices ?? []).filter((x: any) => x.feature_id === f.id && x.status !== "shipped" && x.status !== "cancelled").sort((a: any, b: any) => a.n - b.n)[0];
+  const slice = front ? { slice: front.id } : {};
+  const v = s.verifications.find((x) => x.feature_id === f.id && (!front || x.slice_id == null || x.slice_id === front.id));
   const ship = parseJson<any>(s.ships.find((x) => x.key === `ship:${f.id}`)?.value, null);
   const project = s.projects.find((x) => x.id === f.project_id);
   const prEvent = [...s.events].reverse().find((e) => e.feature_id === f.id && ["pr_closed", "pr_merged", "pr_new_commits"].includes(e.kind));
@@ -550,7 +553,7 @@ function Delivery({ s, f }: { s: State; f: any }) {
   const checks = parseJson<any[]>(v?.checks, []);
   const reqs = parseJson<any[]>(v?.requirements, []);
   const accept = async (confirm: boolean) => {
-    const r = await act.attempt("feature.accept_ship", { id: f.id, head_sha: ship.sha, tree_sha: ship.tree, confirm });
+    const r = await act.attempt("feature.accept_ship", { id: f.id, ...slice, head_sha: ship.sha, tree_sha: ship.tree, confirm });
     if (r.error?.code === "BASE_CHECKED_OUT") setNeedConfirm(r.error.message);
     else {
       setNeedConfirm(null);
@@ -579,10 +582,10 @@ function Delivery({ s, f }: { s: State; f: any }) {
       )}
       <Row wrap>
         {f.spec_change_open ? <T muted size={13}>The spec changed: Verify and Ship wait for its change set.</T> : null}
-        {f.stage === "verify" && v?.status === "failed" && !f.spec_change_open ? <Btn label="Ship with the gaps" onPress={() => void act.run("feature.ship_with_gaps", { id: f.id })} /> : null}
+        {f.stage === "verify" && v?.status === "failed" && !f.spec_change_open ? <Btn label="Ship with the gaps" onPress={() => void act.run("feature.ship_with_gaps", { id: f.id, ...slice })} /> : null}
         {f.stage === "verify" && v?.status === "failed" && !f.spec_change_open ? <Btn label="Turn a failure into a task" onPress={() => setForm({ title: "", description: "", refs: reqs.filter((r) => !r.passed).map((r) => r.requirement_ref).join(", ") })} /> : null}
-        {(f.stage === "verify" || (f.stage === "ship" && !ship?.pr)) && v?.status !== "running" && !f.spec_change_open ? <Btn label="Run Verify again" onPress={() => void act.run("feature.verify", { id: f.id, force: true })} /> : null}
-        {f.stage === "ship" && !ship && !f.spec_change_open ? <Btn label={project?.ship_mode === "pr" ? "Prepare the ship (opens a PR when the repo has a remote)" : "Prepare the ship"} kind="primary" disabled={act.pending} onPress={() => void act.run("feature.prepare_ship", { id: f.id })} /> : null}
+        {(f.stage === "verify" || (f.stage === "ship" && !ship?.pr)) && v?.status !== "running" && !f.spec_change_open ? <Btn label="Run Verify again" onPress={() => void act.run("feature.verify", { id: f.id, ...slice, force: true })} /> : null}
+        {f.stage === "ship" && !ship && !f.spec_change_open ? <Btn label={project?.ship_mode === "pr" ? "Prepare the ship (opens a PR when the repo has a remote)" : "Prepare the ship"} kind="primary" disabled={act.pending} onPress={() => void act.run("feature.prepare_ship", { id: f.id, ...slice })} /> : null}
       </Row>
       {form ? (
         <Card>
@@ -597,7 +600,7 @@ function Delivery({ s, f }: { s: State; f: any }) {
               disabled={!form.title.trim() || act.pending}
               onPress={async () => {
                 const refs = form.refs.split(/[\s,]+/).filter(Boolean);
-                if (await act.run("feature.task_from_failure", { id: f.id, title: form.title, description: form.description, requirement_refs: refs })) setForm(null);
+                if (await act.run("feature.task_from_failure", { id: f.id, ...slice, title: form.title, description: form.description, requirement_refs: refs })) setForm(null);
               }}
             />
             <Btn label="Cancel" onPress={() => setForm(null)} />

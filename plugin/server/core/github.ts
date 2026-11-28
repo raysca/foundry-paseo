@@ -35,6 +35,12 @@ export async function createPr(repo: string, o: { base: string; branch: string; 
   return viewPr(repo, url);
 }
 
+/** Point an open PR at another base (a stacked slice's PR, once the slice under it merged). */
+export async function editPrBase(repo: string, number: number, base: string) {
+  const r = await gh(repo, ["pr", "edit", String(number), "--base", base]);
+  if (r.code !== 0) throw new FoundryError("GH_FAILED", `gh pr edit failed: ${r.stderr.trim() || r.stdout.trim()}`);
+}
+
 export async function viewPr(repo: string, ref: string | number): Promise<PrInfo> {
   const r = await gh(repo, ["pr", "view", String(ref), "--json", "number,url,state,headRefOid"]);
   if (r.code !== 0) throw new FoundryError("GH_FAILED", `gh pr view failed: ${r.stderr.trim() || r.stdout.trim()}`);

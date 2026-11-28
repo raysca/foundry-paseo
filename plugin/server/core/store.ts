@@ -749,8 +749,8 @@ export class Store {
     const f = this.feature(id)!;
     if (f.stage === stage) return;
     this.updateFeature(id, { stage });
-    // The slice at the front of the merge order follows the feature through Build, Verify and Ship;
-    // Done ships every slice. (Per-slice Build, Verify and Ship replace this.)
+    // The slice at the front of the merge order follows the feature through Build, Verify and Ship
+    // (core/slices.ts moves the slices behind it); Done ships every slice.
     const front = this.get<Slice>("SELECT * FROM slices WHERE feature_id=? AND status NOT IN ('shipped','cancelled') ORDER BY n LIMIT 1", id);
     const map: Partial<Record<FeatureStage, SliceStatus>> = { build: "building", verify: "verify", ship: "ship" };
     if (stage === "done") this.run("UPDATE slices SET status='shipped', shipped_sha=COALESCE(shipped_sha, ?), updated_at=datetime('now') WHERE feature_id=? AND status NOT IN ('shipped','cancelled')", f.head_sha, id);
@@ -1011,6 +1011,7 @@ export class Store {
   ownedPaths(): string[] {
     const rows = [
       ...this.all<{ p: string | null }>("SELECT integration_path p FROM features"),
+      ...this.all<{ p: string | null }>("SELECT path p FROM slices WHERE status NOT IN ('shipped','cancelled')"),
       ...this.all<{ p: string | null }>("SELECT check_path p FROM attempts WHERE ended_at IS NULL"),
       ...this.all<{ p: string | null }>("SELECT path p FROM verifications WHERE status='running'"),
     ];

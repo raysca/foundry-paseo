@@ -5,7 +5,8 @@ import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { filesFromBase, paseoScripts, resolveChecks, tail, type TaskChecks } from "./checks";
-import { assertIntegrationUntouched, featureAllowsAutoStart, featureDir, steering } from "./features";
+import { assertIntegrationUntouched, featureDir, steering } from "./features";
+import { frontSlice, mergeForward, setTargetHead, sliceAllowsAutoStart, sliceOfIssue, target } from "./slices";
 import { changedPaths, commitAll, FOUNDRY_IDENT, git, head, HOST_IDENT, identEnv, sh, treeOf } from "./git";
 import type { Host } from "./host";
 import type { Locks } from "./locks";
@@ -87,7 +88,7 @@ export class TaskLoop {
     if (i.origin === "discovered") return false;
     if (!i.feature_id) return false; // quick tasks auto-start only with the project switch (M3)
     const f = this.store.feature(i.feature_id)!;
-    return featureAllowsAutoStart(this.store, f);
+    return sliceAllowsAutoStart(this.store, f, i);
   }
 
   // ---------- start ----------
@@ -117,8 +118,14 @@ export class TaskLoop {
     }
     if (i.flag === "LOOP_MISSING") this.store.updateIssue(key, { flag: null });
 
-    const feature = i.feature_id ? this.store.feature(i.feature_id)! : null;
-    const fromRef = feature ? feature.branch : project.base_ref;
+    // A feature task starts from its slice's branch: the feature's for the front slice.
+    const slice = sliceOfIssue(this.store, i);
+    const view = i.feature_id ? target(this.store, i.feature_id, slice?.id ?? null).view : null;
+    if (view && slice && slice.id !== frontSlice(this.store, i.feature_id!)?.id && !slice.path) {
+      if (actor === "system") return;
+      throw new FoundryError("SLICE_ORDER", `${key} is in slice ${slice.n}, which starts once the slice before it reaches Ship`, { slice: slice.n });
+    }
+    const fromRef = view ? view.branch : project.base_ref;
     const agentId = randomUUID();
     const a = this.store.tx(() => {
       // The branch is Paseo's to name (from the issue key); it is recorded once the workspace exists.
@@ -366,7 +373,7 @@ export class TaskLoop {
   private async startReview(a: Attempt, step: Extract<LoopStep, { kind: "review" }>) {
     const i = this.store.issue(a.issue_key)!;
     const p = this.store.project(i.project_id)!;
-    const f = i.feature_id ? this.store.feature(i.feature_id) : null;
+    const f = i.feature_id ? target(this.store, i.feature_id, sliceOfIssue(this.store, i)?.id ?? null).view : null;
     const baseRef = f ? f.branch : p.base_ref;
     const fork = await git(p.repo, "merge-base", baseRef, a.head_sha!).catch(() => baseRef);
     const diff = await git(p.repo, "diff", `${fork}..${a.head_sha}`).catch((e) => String(e));
@@ -576,7 +583,7 @@ export class TaskLoop {
     let tree_sha: string | null = null;
     if (a?.head_sha) {
       const p = this.store.project(i.project_id)!;
-      const f = i.feature_id ? this.store.feature(i.feature_id) : null;
+      const f = i.feature_id ? target(this.store, i.feature_id, sliceOfIssue(this.store, i)?.id ?? null).view : null;
       const cwd = a.worktree_path && existsSync(a.worktree_path) ? a.worktree_path : p.repo;
       const base = f?.head_sha ? await git(cwd, "merge-base", f.head_sha, a.head_sha).catch(() => "") : "";
       if (base) {
@@ -622,14 +629,17 @@ export class TaskLoop {
     const pre = this.store.issue(key);
     if (!pre) throw new FoundryError("NOT_FOUND", `No issue ${key}`);
     if (!pre.feature_id) throw new FoundryError("NOT_SUPPORTED_YET", "Accepting quick tasks arrives with quick tasks (M3).");
-    const result: { conflict?: string[]; merged?: string } = await this.locks.with(`feature:${pre.feature_id}`, () =>
+    const result: { conflict?: string[]; merged?: string; branch?: string } = await this.locks.with(`feature:${pre.feature_id}`, () =>
       this.locks.with(`attempt:${key}`, async () => {
         const { i, a } = await this.assertReviewable(key, headSha, treeSha);
-        const f = this.store.feature(i.feature_id!)!;
+        // A task merges into its slice's branch: the feature's for the front slice.
+        const t = target(this.store, i.feature_id!, sliceOfIssue(this.store, i)?.id ?? null);
+        const f = t.view;
+        if (!f.integration_path) throw new FoundryError("SLICE_ORDER", `${key}'s slice hasn't started yet`, { slice: t.slice?.n ?? null });
         try {
           await assertIntegrationUntouched(this.store, f);
         } catch (e) {
-          this.store.setSetting(`feature_hold:${f.id}`, "INTEGRATION_MOVED");
+          this.store.setSetting(t.front ? `feature_hold:${f.id}` : `slice_hold:${t.slice!.id}`, "INTEGRATION_MOVED");
           throw e;
         }
         const path = f.integration_path!;
@@ -642,12 +652,12 @@ export class TaskLoop {
             await sh("git", ["merge", "--abort"], { cwd: path });
             this.store.event("merge_conflict", { actor: "system", issue: key, attempt: a.id, feature: f.id, detail: { paths: conflicts, reviewed: headSha } });
             this.store.updateIssue(key, { flag: "MERGE_CONFLICT" });
-            return { conflict: conflicts };
+            return { conflict: conflicts, branch: f.branch };
           }
         }
         merged = await head(path);
         this.store.tx(() => {
-          this.store.updateFeature(f.id, { head_sha: merged });
+          setTargetHead(this.store, t, merged);
           this.store.run("INSERT INTO reviews(attempt_id,actor,decision,head_sha,tree_sha,feedback) VALUES(?,?,?,?,?,?)", a.id, actor, "accept", headSha, treeSha, feedback);
           this.store.setIssueStatus(key, "Done", actor, null, { merged });
           this.store.event("task_merged", { actor, issue: key, attempt: a.id, feature: f.id, detail: { head: headSha, merged } });
@@ -656,23 +666,25 @@ export class TaskLoop {
           if (i.flag === "SPEC_CHANGED") this.store.event("flag_accepted_as_is", { actor, issue: key, feature: f.id, detail: { refs: parse<string[]>(i.requirement_refs, []) } });
         });
         for (const ws of [a.workspace_id, a.check_workspace_id]) if (ws) void this.host.archiveWorkspace(ws).catch(() => {});
-        return { merged };
+        // The slice building on top of the front takes the front's new work.
+        if (t.front) await mergeForward(this.store, this.host, f.id, actor);
+        return { merged, branch: f.branch };
       }),
     );
     if (result.conflict) {
       const conflict = result.conflict;
       // The reviewed SHA is kept (never rebased); the task goes back to its agent to merge the feature branch in.
-      const f = this.store.feature(pre.feature_id)!;
+      const branch = result.branch!;
       await this.continueInSession(
         key,
-        `Accepting your work hit a merge conflict with ${f.branch} in: ${conflict.join(", ")}. Merge ${f.branch} into your branch, resolve the conflicts, and end your turn. Do not commit; Foundry commits for you.`,
+        `Accepting your work hit a merge conflict with ${branch} in: ${conflict.join(", ")}. Merge ${branch} into your branch, resolve the conflicts, and end your turn. Do not commit; Foundry commits for you.`,
         "system",
         "conflict",
       );
       return { conflict };
     }
     await this.tick();
-    return result;
+    return { merged: result.merged };
   }
 
   async rework(key: string, headSha: string, treeSha: string, feedback: string, actor: Actor = "you") {

@@ -99,7 +99,9 @@ function planningLabel(store: Store, f: Feature) {
 function deliveryLabel(store: Store, f: Feature): { label: string | null; waiting: boolean } {
   if (f.stage !== "verify" && f.stage !== "ship") return { label: null, waiting: false };
   const v = store.get<{ status: string; failure: string | null; checks: string; requirements: string }>(
-    "SELECT status, failure, checks, requirements FROM verifications WHERE feature_id=? ORDER BY id DESC LIMIT 1",
+    "SELECT status, failure, checks, requirements FROM verifications WHERE feature_id=? AND (slice_id IS NULL OR slice_id=(SELECT id FROM slices WHERE feature_id=? AND status NOT IN ('shipped','cancelled') ORDER BY n LIMIT 1) OR NOT EXISTS (SELECT 1 FROM slices WHERE feature_id=? AND status NOT IN ('shipped','cancelled'))) ORDER BY id DESC LIMIT 1",
+    f.id,
+    f.id,
     f.id,
   );
   if (f.stage === "ship") {
