@@ -51,6 +51,7 @@ bash e2e/ship-pr.sh               # M2 exit test: Ship by GitHub PR with a fake 
                                   # editing its spec, turn a failed Verify requirement into a task, merge a second PR
 bash e2e/slices.sh                # slices exit test: three slices as stacked PRs, promoted and retargeted in order,
                                   # a spec change landing in the building slice
+bash e2e/pages.sh                 # page checks: a frontend task's page step against its Paseo service, with a screenshot
 bash e2e/exit.sh                  # M1 exit test: loop 1 with a spec edit during Build, through Verify and Ship
 bash e2e/ui.sh                    # the same scenario clicked through Foundry's screens in Paseo's web app (needs Playwright)
 ```

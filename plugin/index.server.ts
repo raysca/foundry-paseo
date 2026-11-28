@@ -257,6 +257,16 @@ export default function contribute(server: PluginServerContext) {
           return foundry.delivery.taskFromFailure(Number(args.id), String(args.title ?? ""), String(args.description ?? ""), Array.isArray(args.requirement_refs) ? args.requirement_refs.map(String) : [], "you", args.slice ? Number(args.slice) : null);
         case "feature.refresh_pr":
           return { results: await foundry.delivery.refreshPrs(Number(args.id), "you") };
+        case "run.screenshot": {
+          // A page check's screenshot, by name from the run's own list (never a path from the client).
+          const r = store.get<{ detail: string }>("SELECT detail FROM runs WHERE id=?", Number(args.id));
+          const d = r ? (JSON.parse(r.detail) as { dir?: string; screenshots?: string[] }) : {};
+          const file = String(args.file ?? "");
+          if (!d.dir || !d.screenshots?.includes(file) || !existsSync(join(d.dir, file))) throw new FoundryError("NOT_FOUND", `No screenshot ${file} on run ${args.id}.`);
+          const ext = file.split(".").pop()!.toLowerCase();
+          const mime = ext === "jpg" || ext === "jpeg" ? "image/jpeg" : `image/${ext}`;
+          return { uri: `data:${mime};base64,${readFileSync(join(d.dir, file)).toString("base64")}` };
+        }
         case "project.loops":
           return foundry.tasks.loops(Number(args.id ?? store.projectByKey(String(args.project))?.id));
         case "project.set_default_loop":
@@ -328,7 +338,7 @@ interface SeedArgs {
   project: string;
   slug: string;
   title: string;
-  tasks: { title: string; description?: string; depends_on?: number[] }[];
+  tasks: { title: string; description?: string; depends_on?: number[]; loop?: string; checks?: Record<string, unknown> }[];
 }
 
 async function seedFeature(foundry: Foundry, a: SeedArgs) {
@@ -342,7 +352,7 @@ async function seedFeature(foundry: Foundry, a: SeedArgs) {
     const keys: string[] = [];
     for (const t of a.tasks) {
       const deps = (t.depends_on ?? []).map((n) => keys[n]!);
-      const i = store.createIssue({ projectId: p.id, featureId: f.id, origin: "feature", title: t.title, description: t.description ?? "", status: deps.length ? "Backlog" : "Ready" });
+      const i = store.createIssue({ projectId: p.id, featureId: f.id, origin: "feature", title: t.title, description: t.description ?? "", status: deps.length ? "Backlog" : "Ready", loop: t.loop ?? null, checks: t.checks ?? {} });
       for (const d of deps) store.addDep(i.key, d);
       keys.push(i.key);
     }

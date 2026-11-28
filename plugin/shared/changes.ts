@@ -14,6 +14,7 @@ export const CHANGES: Change[] = [
       "Task loops for each kind of work: backend, frontend, bugfix (reproduce the bug with a test first) and docs (no project checks, only the task's own). The project manager picks one for each task; change it on the proposed task list, or on a task that isn't running. Set the project's default loop on the project page.",
       "Your own loops: a .foundry/loops/<name>.yaml file on base adds a loop with the same steps and rules as the built-ins. A file that doesn't validate is listed on the project page with what's wrong.",
       "Bug fixes are reproduced: on the bugfix loop Foundry runs the new test with the fix reverted (it must fail) and with it (it must pass), and shows both runs at review. A fix without a test, or with a test that passes anyway, goes back to the builder, then comes to you flagged REPRO_FAILED.",
+      "Page checks: on the frontend loop Foundry starts your paseo.json service, runs your \"page-check\" script against it (it gets FOUNDRY_PAGE_URL, FOUNDRY_PAGES and FOUNDRY_SCREENSHOTS) and shows the screenshots it saves at review. Your script owns the browser. A project without a service or a page-check script skips the step; a failing page check goes back to the builder, then comes to you flagged PAGE_CHECK_FAILED.",
     ],
   },
   {

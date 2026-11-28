@@ -42,6 +42,8 @@ export interface ScriptResult {
   terminalId: string | null;
 }
 
+export type ServiceStart = { ok: true; url: string; terminalId: string | null } | { ok: false; output: string; terminalId: string | null };
+
 /** A Paseo agent profile, as Foundry reads it. */
 export interface HostProfile {
   id: string;
@@ -65,7 +67,7 @@ export interface HostFacts {
 
 export type TimelineData =
   | { step: "commit"; sha: string; message: string }
-  | { step: "check"; name: string; status: "passed" | "failed"; code: number; sha: string; tail: string }
+  | { step: "check"; name: string; status: "passed" | "failed"; code: number; sha: string; tail: string; screenshots?: string[] }
   | { step: "fix_round"; round: number; checks: string[] }
   | { step: "verdict"; verdict: string; summary: string; sha: string }
   | { step: "status"; issue: string; status: string; detail?: string }
@@ -96,6 +98,12 @@ export interface Host {
   archiveWorkspace(workspaceId: string): Promise<void>;
   /** Run one of the project's paseo.json scripts with Paseo's script runner and wait for its exit code. */
   runScript(o: { workspaceId: string; script: string; env: Record<string, string>; timeoutMs: number }): Promise<ScriptResult>;
+  /**
+   * Start a paseo.json service script (Paseo picks its port) and wait until it answers on that port.
+   * Resolves with its local URL, or with why it didn't come up (it exited, or the wait ran out).
+   */
+  startService(o: { workspaceId: string; script: string; timeoutMs: number }): Promise<ServiceStart>;
+  stopService(workspaceId: string, script: string): Promise<void>;
 
   timeline(agentId: string, rowId: string, data: TimelineData): Promise<void>;
   setWorkspaceMetadata(workspaceId: string, data: Record<string, unknown>): Promise<void>;

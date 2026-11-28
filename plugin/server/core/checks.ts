@@ -13,7 +13,47 @@ export interface TaskChecks {
   paths?: string[];
   /** For a repro step: the script that runs the reproducing test, and the files that hold it. */
   repro?: { script?: string; files?: string[] };
+  /** For a page step: the pages (paths like /settings) the change affects, passed to the page check script. */
+  pages?: string[];
 }
+
+/** The paseo.json script a page step runs by default. Check steps that name no scripts leave it out. */
+export const PAGE_SCRIPT = "page-check";
+
+/** paseo.json scripts of type "service" at a ref (the app a page check runs against). */
+export async function paseoServices(repo: string, ref: string): Promise<string[]> {
+  const raw = await git(repo, "show", `${ref}:paseo.json`).catch(() => null);
+  if (!raw) return [];
+  try {
+    const cfg = JSON.parse(raw) as { scripts?: Record<string, { type?: string; command?: string }> };
+    return Object.entries(cfg.scripts ?? {})
+      .filter(([, s]) => s && s.type === "service" && typeof s.command === "string")
+      .map(([name]) => name);
+  } catch {
+    return [];
+  }
+}
+
+export type PageResolution = { kind: "run"; service: string; script: PaseoScript } | { kind: "skip"; hint: string } | { kind: "unknown"; message: string };
+
+/**
+ * What a page step runs: its service (the step's, else the only service, else one named web, app or
+ * dev, else the first) and its page check script (the step's, else "page-check"). A project without
+ * either skips the step; a name the step gives that paseo.json doesn't have is a failure.
+ */
+export function resolvePage(step: Extract<LoopStep, { kind: "page" }>, scripts: PaseoScript[], services: string[]): PageResolution {
+  const scriptName = step.script ?? PAGE_SCRIPT;
+  const script = scripts.find((s) => s.name === scriptName);
+  if (step.script && !script) return { kind: "unknown", message: `paseo.json has no script "${step.script}" for the page check.` };
+  if (step.service && !services.includes(step.service)) return { kind: "unknown", message: `paseo.json has no service "${step.service}" for the page check.` };
+  const service = step.service ?? (services.length === 1 ? services[0] : (["web", "app", "dev"].find((n) => services.includes(n)) ?? services[0]));
+  if (!script || !service)
+    return { kind: "skip", hint: `Add a script of type "service" that starts the app and a "${PAGE_SCRIPT}" script that checks its pages to paseo.json. The page check gets FOUNDRY_PAGE_URL, FOUNDRY_PAGES and FOUNDRY_SCREENSHOTS.` };
+  return { kind: "run", service, script };
+}
+
+/** Screenshot files a page check left in its folder, in name order. */
+export const SHOT_FILE = /\.(png|jpe?g|webp|gif)$/i;
 
 /** paseo.json scripts of type "script" at a ref. */
 export async function paseoScripts(repo: string, ref: string): Promise<PaseoScript[]> {
@@ -39,8 +79,9 @@ export interface ResolvedChecks {
 /** The scripts and required paths one check step runs for one task: the step's, plus the task's own. */
 export function resolveChecks(step: Extract<LoopStep, { kind: "check" }>, task: TaskChecks, available: PaseoScript[]): ResolvedChecks {
   const byName = new Map(available.map((s) => [s.name, s]));
-  // No scripts named: every paseo.json script; an empty list: none (only the task's own checks).
-  const wanted = step.scripts ? [...step.scripts] : available.map((s) => s.name);
+  // An empty list: none (only the task's own checks).
+  // No scripts named: every paseo.json script but the page check (it needs its service; see page steps).
+  const wanted = step.scripts ? [...step.scripts] : available.filter((s) => s.name !== PAGE_SCRIPT).map((s) => s.name);
   for (const s of task.scripts ?? []) if (!wanted.includes(s)) wanted.push(s);
   const scripts: PaseoScript[] = [];
   const unknown: string[] = [];

@@ -199,6 +199,12 @@ async function script(s: Session, text: string): Promise<string> {
     write(cwd, "tests/test_core.py", "import unittest\n\nfrom shout.core import shout\n\n\nclass ShoutTest(unittest.TestCase):\n    def test_shout(self):\n        self.assertEqual(shout(\"hi\"), \"HI!\")\n");
     return "Added shout() with a test.";
   }
+  // The page checks e2e test: a button on the home page the page check looks for.
+  if (task && /Shout button/.test(task[2]!)) {
+    write(cwd, "site/index.html", "<h1>Shout</h1>\n<button>Shout</button>\n");
+    return "Added the Shout button to the home page.";
+  }
+  if (text.startsWith("Foundry's page check failed")) return "Looked at the page check; ending turn.";
   if (task && /^Document/.test(task[2]!)) {
     write(cwd, "docs/loud.md", "# --loud\n\nAn alias of --shout.\n");
     return "Documented --loud.";

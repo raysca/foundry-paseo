@@ -124,6 +124,8 @@ export function buildTools(f: Foundry): ToolSet {
               paths: z.array(z.string()).optional(),
               // bugfix loop: the paseo.json script that runs the reproducing test, and the test files.
               repro: z.object({ script: z.string().optional(), files: z.array(z.string()).optional() }).optional(),
+              // frontend loop: the pages (paths such as /settings) the change affects, for the page check.
+              pages: z.array(z.string()).optional(),
             })
             .optional(),
           profile: z.string().optional(),

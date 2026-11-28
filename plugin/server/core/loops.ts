@@ -1,4 +1,4 @@
-// Task loops: the ordered steps an attempt runs (agent, check, repro, review). Loops are data from day one,
+// Task loops: the ordered steps an attempt runs (agent, check, repro, page, review). Loops are data from day one,
 // validated by the same rules the runner and (later) the designer use, and frozen onto the attempt
 // when it starts, so a change to a loop affects the next attempt only. Borrows Playbooks' patterns
 // (frozen definition from base, validation, bounded rework) without depending on Playbooks.
@@ -11,6 +11,8 @@ export type LoopStep =
   | { kind: "check"; name: string; scripts?: string[]; paths?: string[]; max_fix_rounds?: number; timeout_minutes?: number }
   /** A bug's reproduction: the test script fails with the fix reverted and passes with it. */
   | { kind: "repro"; name: string; script?: string; max_fix_rounds?: number; timeout_minutes?: number }
+  /** The app's pages: start a paseo.json service, run the page check script against it, keep its screenshots. */
+  | { kind: "page"; name: string; service?: string; script?: string; max_fix_rounds?: number; timeout_minutes?: number }
   | { kind: "review"; name: string; prompt?: string; back_to?: string; max_reworks?: number };
 
 export interface LoopDef {
@@ -45,7 +47,8 @@ export const BUILTIN_LOOPS: Record<string, LoopDef> = {
     steps: [
       { kind: "agent", name: "build", prompt: DOMAIN.frontend },
       { kind: "check", name: "check" },
-      { kind: "review", name: "review", back_to: "build", max_reworks: 1, prompt: `${DOMAIN.frontend} Check the change from the user's side as well as the code.` },
+      { kind: "page", name: "pages" },
+      { kind: "review", name: "review", back_to: "build", max_reworks: 1, prompt: `${DOMAIN.frontend} Check the change from the user's side as well as the code: open the page check's screenshots when there are any.` },
     ],
   },
   bugfix: {
@@ -77,7 +80,7 @@ export function validateLoop(def: LoopDef): string[] {
   if (def.steps[0] && def.steps[0].kind !== "agent") errors.push("The first step must be the agent (the builder's turn).");
   const names = new Set<string>();
   def.steps.forEach((s, i) => {
-    if (!["agent", "check", "repro", "review"].includes(s.kind)) errors.push(`Step ${i + 1} has unknown kind "${(s as { kind: string }).kind}".`);
+    if (!["agent", "check", "repro", "page", "review"].includes(s.kind)) errors.push(`Step ${i + 1} has unknown kind "${(s as { kind: string }).kind}".`);
     if (!s.name) errors.push(`Step ${i + 1} needs a name.`);
     if (names.has(s.name)) errors.push(`Step name "${s.name}" is used twice.`);
     if (s.kind === "review" && s.back_to !== undefined) {
@@ -133,6 +136,7 @@ export function parseLoopFile(name: string, doc: unknown): { def: LoopDef | null
     agent: ["kind", "name", "prompt"],
     check: ["kind", "name", "scripts", "paths", "max_fix_rounds", "timeout_minutes"],
     repro: ["kind", "name", "script", "max_fix_rounds", "timeout_minutes"],
+    page: ["kind", "name", "service", "script", "max_fix_rounds", "timeout_minutes"],
     review: ["kind", "name", "prompt", "back_to", "max_reworks"],
   };
   const errors: string[] = [];
@@ -146,8 +150,10 @@ export function parseLoopFile(name: string, doc: unknown): { def: LoopDef | null
       const v = (st as Record<string, unknown>)[k];
       if (v !== undefined && (!Array.isArray(v) || v.some((x) => typeof x !== "string"))) errors.push(`Step ${i + 1}: ${k} must be a list of names.`);
     }
-    const script = (st as Record<string, unknown>).script;
-    if (script !== undefined && typeof script !== "string") errors.push(`Step ${i + 1}: script must be a script name.`);
+    for (const k of ["script", "service"]) {
+      const v = (st as Record<string, unknown>)[k];
+      if (v !== undefined && typeof v !== "string") errors.push(`Step ${i + 1}: ${k} must be a script name.`);
+    }
   });
   const def: LoopDef = { name, source: "project", steps: d.steps as LoopStep[] };
   errors.push(...validateLoop(def));
