@@ -43,6 +43,7 @@ export function lintRequirements(reqs: ProposedRequirement[]): string[] {
 export interface TaskChecksInput {
   scripts?: string[];
   paths?: string[];
+  repro?: { script?: string; files?: string[] };
 }
 
 export interface ProposedTask {
