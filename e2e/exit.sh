@@ -94,7 +94,7 @@ else
 fi
 if [ -n "$NEW" ]; then
   log "added $NEW"
-  git -C "$WORK/repo" show "foundry/feature/shout-mode:.foundry/features/shout-mode/spec.md" | grep "### $NEW " >/dev/null
+  git -C "$WORK/repo" show "$(q "print([f for f in d['features'] if f['slug']=='shout-mode'][0]['branch'])"):.foundry/features/shout-mode/spec.md" | grep "### $NEW " >/dev/null
 else
   log "--loud folded into existing requirements: $(q "print(' '.join(r['ref'] for r in d['requirements'] if r['feature_id']==$FID and '--loud' in r['criteria']))")"
 fi

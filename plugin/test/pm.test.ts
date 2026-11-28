@@ -66,7 +66,7 @@ test("the PM answers in its thread from the board, one turn at a time, and links
   ]);
   // Its session runs on its own branch, cut from base.
   const ws = host.workspaces.get(parse<{ workspaceId: string }>(store.setting(`pm_ws:${p.id}`), { workspaceId: "" }).workspaceId)!;
-  assert.equal(ws.branch, "foundry/pm/SHT");
+  assert.equal(ws.branch, "sht-pm", "Paseo names the branch from the project key");
   await assert.rejects(foundry.pm.send(p.id, "  "), code("MESSAGE_EMPTY"));
   await assert.rejects(foundry.pm.send(p.id, "hi", UPDATES_THREAD), code("THREAD_READ_ONLY"));
   assert.throws(() => foundry.pm.board("not-the-pm"), code("TOOL_REFUSED"));

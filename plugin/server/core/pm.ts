@@ -130,19 +130,25 @@ export class ProjectManager {
     });
   }
 
-  /** The PM works on its own branch, foundry/pm/<KEY>, cut from base once. */
+  /** The PM works on its own branch, cut from base once (Paseo names it from <key>-pm). */
   private async workspace(p: Project) {
     const key = `pm_ws:${p.id}`;
     const saved = parse<{ workspaceId: string } | null>(this.store.setting(key), null);
     if (saved) return saved.workspaceId;
-    const ws = await this.host.createWorktreeWorkspace({ repo: p.repo, title: `${p.name} PM`, branch: `foundry/pm/${p.key}`, from: p.base_ref, purpose: "pm", visible: false });
+    const ws = await this.host.createWorktreeWorkspace({ repo: p.repo, title: `${p.name} PM`, slug: `${p.key.toLowerCase()}-pm`, from: p.base_ref, purpose: "pm", visible: false });
+    this.store.recordBranch(p.repo, ws.branch, "pm");
     this.store.setSetting(key, JSON.stringify(ws));
     return ws.workspaceId;
   }
 
+  /** The PM's branch: as recorded, or the name used before Paseo named branches. */
+  private branch(p: Project) {
+    return parse<{ branch?: string } | null>(this.store.setting(`pm_ws:${p.id}`), null)?.branch || `foundry/pm/${p.key}`;
+  }
+
   private preamble(p: Project, thread: string) {
     return [
-      `You are Foundry's project manager for ${p.name} (issue keys ${p.key}-n). You work in a checkout of ${p.base_ref} on your own branch foundry/pm/${p.key}.`,
+      `You are Foundry's project manager for ${p.name} (issue keys ${p.key}-n). You work in a checkout of ${p.base_ref} on your own branch ${this.branch(p)}.`,
       "Answer from the project's data: get_project_overview, get_board, get_feature, get_issue and get_run_log_tail. Link every claim to its source (issue key, feature slug, commit). When you don't know, say so.",
       "To change the work, call propose_actions with set_priority, retry or cancel. Foundry applies an action that touches no active work at once. Anything that touches an active task, its worktree or a feature branch is shown to the developer as a card with your warnings and waits for their yes; say so in your reply.",
       "You never approve docs, accept reviews, merge, push or ship: those are the developer's.",

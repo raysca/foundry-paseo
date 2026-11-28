@@ -67,7 +67,7 @@ export class Planning {
     if (o.grill && !(o.grill in GRILL_ROUNDS)) throw new FoundryError("INVALID_GRILL", "Grill level is none, light or normal.");
     const title = (o.title?.trim() || idea.split("\n")[0]!).slice(0, 80);
     const slug = await uniqueSlug(this.store, p.id, p.repo, title);
-    const f0 = this.store.createFeature({ projectId: p.id, slug, title, idea, flow: "standard", branch: `foundry/feature/${slug}` });
+    const f0 = this.store.createFeature({ projectId: p.id, slug, title, idea, flow: "standard", branch: "" });
     if (o.grill) this.store.updateFeature(f0.id, { grill: o.grill });
     let f: Feature;
     try {
@@ -76,7 +76,7 @@ export class Planning {
       // Nothing is left behind: no worktree, no branch, no feature.
       const half = this.store.feature(f0.id)!;
       if (half.integration_workspace_id) await this.host.archiveWorkspace(half.integration_workspace_id).catch(() => {});
-      await sh("git", ["branch", "-D", f0.branch], { cwd: p.repo });
+      if (half.branch) await sh("git", ["branch", "-D", half.branch], { cwd: p.repo });
       this.store.tx(() => {
         this.store.run("DELETE FROM feature_docs WHERE feature_id=?", f0.id);
         this.store.run("DELETE FROM events WHERE feature_id=?", f0.id);

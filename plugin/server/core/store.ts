@@ -374,6 +374,10 @@ export const MIGRATIONS: readonly string[] = [
    CREATE TABLE paseo_owned (
      kind TEXT NOT NULL, id TEXT NOT NULL, value TEXT NOT NULL,
      at TEXT NOT NULL DEFAULT (datetime('now')), PRIMARY KEY(kind, id));`,
+  // 8: every branch Foundry had Paseo create (Paseo names them now), for the uninstall list
+  `CREATE TABLE branches (
+     repo TEXT NOT NULL, branch TEXT NOT NULL, purpose TEXT NOT NULL,
+     created_at TEXT NOT NULL DEFAULT (datetime('now')), PRIMARY KEY(repo, branch));`,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
@@ -455,6 +459,23 @@ export class Store {
       }
       v = from + 1;
     }
+  }
+
+  // ---------- branches Foundry made ----------
+  recordBranch(repo: string, branch: string, purpose: string) {
+    if (branch) this.run("INSERT OR IGNORE INTO branches(repo,branch,purpose) VALUES(?,?,?)", repo, branch, purpose);
+  }
+  /** Branches Foundry made in a repo: the ones it recorded, plus feature, task and PM branches from before recording. */
+  branchesMade(repo: string): string[] {
+    const rows = this.all<{ b: string }>(
+      `SELECT branch b FROM branches WHERE repo=?
+       UNION SELECT f.branch FROM features f JOIN projects p ON p.id=f.project_id WHERE p.repo=? AND f.branch<>''
+       UNION SELECT a.branch FROM attempts a JOIN issues i ON i.key=a.issue_key JOIN projects p ON p.id=i.project_id WHERE p.repo=? AND a.branch<>''`,
+      repo,
+      repo,
+      repo,
+    );
+    return rows.map((r) => r.b).sort();
   }
 
   // ---------- onboarding ----------

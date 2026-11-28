@@ -52,7 +52,7 @@ wait_for "$(st SHT-2)=='In_Review'" 240 "SHT-2 In_Review"
 accept SHT-2
 
 log "the feature branch has the docs and both tasks, and no stray PM writes"
-B=foundry/feature/$(q "print($(feat)['slug'])")
+B=$(q "print($(feat)['branch'])")   # named by Paseo from the slug
 git -C "$WORK/repo" show "$B:.foundry/features/shout-mode/tasks.md" | grep "Written by Foundry" >/dev/null
 git -C "$WORK/repo" show "$B:shout/cli.py" | grep '"-s"' >/dev/null
 git -C "$WORK/repo" log --format=%an "$B" | grep "Foundry PM" >/dev/null

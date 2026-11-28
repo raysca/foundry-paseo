@@ -6,10 +6,11 @@ import { resolve, sep } from "node:path";
 import type { PaseoApi } from "@getpaseo/client";
 import type { PluginServerContext, AgentToolDefinition } from "@getpaseo/plugin/server";
 import { DaemonClient } from "@getpaseo/client/internal/daemon-client";
-import type { AgentSpec, AgentStatus, Harness, Host, HostFacts, HostProfile, ProfileChoice, ScriptResult, StartedAgent, TimelineData } from "../core/host";
+import type { AgentSpec, AgentStatus, Harness, Host, WorktreeRequest, HostFacts, HostProfile, ProfileChoice, ScriptResult, StartedAgent, TimelineData } from "../core/host";
 import type { Role } from "../core/model";
 import type { Store } from "../core/store";
 import { profileId, roleProfile } from "../core/setup";
+import { currentBranch } from "../core/git";
 import { profilesPatch, removeProfilesPatch } from "./profiles";
 
 /** What the adapter reports back to Foundry's core. */
@@ -234,14 +235,17 @@ export class PaseoAdapter implements Host {
 
     let ws;
     let path: string;
+    let branch: string | undefined;
     const place = spec.place;
     if (place.kind === "new-worktree") {
+      // Paseo names the branch from the slug and makes it unique in the repo.
       ws = await this.paseo.workspaces.create({
-        source: { kind: "worktree", cwd: place.repo, action: "branch-off", refName: place.fromRef, branchName: place.branch },
+        source: { kind: "worktree", cwd: place.repo, action: "branch-off", refName: place.fromRef, worktreeSlug: place.slug },
         title: spec.title,
         background: !place.visible,
       } as never);
       path = await this.workspaceDir(ws);
+      branch = await currentBranch(path);
     } else if (place.kind === "workspace") {
       ws = this.paseo.workspaces.ref(place.workspaceId);
       path = await this.workspaceDir(ws);
@@ -266,7 +270,7 @@ export class PaseoAdapter implements Host {
         "foundry.profile": profile,
       },
     } as never);
-    return { agentId: spec.agentId, workspaceId: ws.id, path };
+    return { agentId: spec.agentId, workspaceId: ws.id, path, branch };
   }
 
   private async workspaceDir(ws: { id: string; directory?: string | null; refresh(): Promise<unknown> }) {
@@ -309,14 +313,16 @@ export class PaseoAdapter implements Host {
   }
 
   // ---------- workspaces and scripts ----------
-  async createWorktreeWorkspace(o: { repo: string; title: string; branch: string; from?: string; purpose: string; visible: boolean }) {
-    const source = o.from
-      ? { kind: "worktree", cwd: o.repo, action: "branch-off", refName: o.from, branchName: o.branch }
-      : { kind: "worktree", cwd: o.repo, action: "checkout", refName: o.branch };
+  async createWorktreeWorkspace(o: WorktreeRequest) {
+    // A new branch is named by Paseo from the slug (unique in the repo); an existing one is checked out.
+    const source =
+      o.from !== undefined
+        ? { kind: "worktree", cwd: o.repo, action: "branch-off", refName: o.from, worktreeSlug: o.slug }
+        : { kind: "worktree", cwd: o.repo, action: "checkout", refName: o.branch };
     const ws = await this.paseo.workspaces.create({ source, title: o.title, background: !o.visible } as never);
     const path = await this.workspaceDir(ws);
     await ws.setMetadata({ "foundry.purpose": o.purpose }).catch(() => {});
-    return { workspaceId: ws.id, path };
+    return { workspaceId: ws.id, path, branch: await currentBranch(path) };
   }
 
   async archiveWorkspace(workspaceId: string) {

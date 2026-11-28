@@ -57,6 +57,8 @@ wait_for "$(st SHT-2)=='In_Review'" 240 "SHT-2 In_Review after the late answer"
 accept SHT-2
 
 log "the feature branch has both tasks"
-git -C "$WORK/repo" show foundry/feature/shout-mode:shout/cli.py | grep -q '"-s"'
-git -C "$WORK/repo" show foundry/feature/shout-mode:shout/core.py | grep -q upper
+B=$(q "print(d['features'][0]['branch'])")   # named by Paseo from the slug
+[ "$B" = shout-mode ] || { log "unexpected feature branch $B"; exit 1; }
+git -C "$WORK/repo" show "$B:shout/cli.py" | grep -q '"-s"'
+git -C "$WORK/repo" show "$B:shout/core.py" | grep -q upper
 log "loop2 passed"

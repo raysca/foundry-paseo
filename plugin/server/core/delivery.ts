@@ -118,11 +118,12 @@ export class Delivery {
       const ws = await this.host.createWorktreeWorkspace({
         repo: p.repo,
         title: `${f.title} verify`,
-        branch: `foundry/verify/${f.slug}/${r.verification}-${randomUUID().slice(0, 4)}`,
+        slug: `${f.slug}-verify-${r.verification}`,
         from: r.sha,
         purpose: "verify",
         visible: false,
       });
+      this.store.recordBranch(p.repo, ws.branch, "verify");
       this.store.run("UPDATE verifications SET workspace_id=?, path=? WHERE id=?", ws.workspaceId, ws.path, r.verification);
       const union: TaskChecks = { scripts: [], paths: [] };
       for (const i of this.store.issues({ featureId: f.id }).filter((x) => x.status !== "Cancelled")) {

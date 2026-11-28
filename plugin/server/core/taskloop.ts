@@ -119,10 +119,10 @@ export class TaskLoop {
 
     const feature = i.feature_id ? this.store.feature(i.feature_id)! : null;
     const fromRef = feature ? feature.branch : project.base_ref;
-    const branch = `foundry/task/${key}/${randomUUID().slice(0, 6)}`;
     const agentId = randomUUID();
     const a = this.store.tx(() => {
-      const a = this.store.createAttempt(key, branch, loop);
+      // The branch is Paseo's to name (from the issue key); it is recorded once the workspace exists.
+      const a = this.store.createAttempt(key, "", loop);
       this.store.updateAttempt(a.id, { builder_agent_id: agentId, step: "build", step_index: 0 });
       this.store.setIssueStatus(key, "In_Progress", actor, null, { attempt: a.n });
       return a;
@@ -136,7 +136,7 @@ export class TaskLoop {
         const started = await this.host.startAgent({
           agentId,
           role: "builder",
-          place: { kind: "new-worktree", repo: project.repo, branch, fromRef, visible: true },
+          place: { kind: "new-worktree", repo: project.repo, slug: key.toLowerCase(), fromRef, visible: true },
           prompt,
           title: `${key} ${i.title}`.slice(0, 80),
           profile: i.profile,
@@ -146,7 +146,8 @@ export class TaskLoop {
           projectId: i.project_id,
         });
         const base = await head(started.path);
-        this.store.updateAttempt(a.id, { workspace_id: started.workspaceId, worktree_path: started.path, head_sha: base, tree_sha: await treeOf(started.path, base) });
+        if (started.branch) this.store.recordBranch(project.repo, started.branch, "task");
+        this.store.updateAttempt(a.id, { branch: started.branch ?? "", workspace_id: started.workspaceId, worktree_path: started.path, head_sha: base, tree_sha: await treeOf(started.path, base) });
       } catch (e) {
         this.store.endRun(runId, "failed", { error: String(e) });
         this.endAttempt(a.id, "failed", { issueStatus: "Blocked", reason: "INFRA_ERROR", detail: `could not start the builder: ${String(e)}` });
@@ -307,11 +308,12 @@ export class TaskLoop {
       const made = await this.host.createWorktreeWorkspace({
         repo: p.repo,
         title: `${i.key} checks`,
-        branch: `foundry/check/${i.key}/${a.n}-${randomUUID().slice(0, 4)}`,
+        slug: `${i.key.toLowerCase()}-check-${a.n}`,
         from: sha,
         purpose: "check",
         visible: false,
       });
+      this.store.recordBranch(p.repo, made.branch, "check");
       ws = made.workspaceId;
       path = made.path;
       this.store.updateAttempt(a.id, { check_workspace_id: ws, check_path: path });
