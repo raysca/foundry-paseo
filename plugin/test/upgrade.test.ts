@@ -73,15 +73,15 @@ test("a failing migration rolls back: the version and data stay as they were, an
   const path = join(d, "foundry.db");
   const last = SCHEMA_VERSION - 1;
   atVersion(path, last);
-  // Something in the way of the last migration (it creates branches).
+  // Something in the way of the last migration (it creates doc_comments).
   const db = new DatabaseSync(path);
-  db.exec("CREATE TABLE branches (x TEXT)");
+  db.exec("CREATE TABLE doc_comments (x TEXT)");
   db.close();
   assert.throws(() => new Store(path), (e: any) => e.code === "MIGRATION_FAILED" && new RegExp(`unchanged at schema ${last}`).test(e.message));
   const after = new DatabaseSync(path);
   assert.equal((after.prepare("SELECT value FROM meta WHERE key='schema_version'").get() as any).value, String(last));
   assert.equal((after.prepare("SELECT COUNT(*) n FROM issues").get() as any).n, 1);
-  assert.ok(!(after.prepare("SELECT 1 FROM pragma_table_info('branches') WHERE name='purpose'").get()), "no part of the failed migration stayed");
+  assert.ok(!(after.prepare("SELECT 1 FROM pragma_table_info('doc_comments') WHERE name='quote'").get()), "no part of the failed migration stayed");
   after.close();
   assert.equal(backups(d).length, 1);
 });

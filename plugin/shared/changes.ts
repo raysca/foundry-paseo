@@ -12,6 +12,8 @@ export const CHANGES: Change[] = [
     version: "0.3.0",
     notes: [
       "Quick flow: pick it when you create a feature, and the project manager writes the spec, plan and task list in one turn. You approve all three at once.",
+      "Comment on lines of a spec, plan or task list, then send your comments with a revision request. The project manager can comment back.",
+      "Each doc lists its revisions and shows the diff between any two.",
       "Paseo now names the branches of Foundry's workspaces (for example shout-mode or sht-1) instead of Foundry's own foundry/... names.",
     ],
   },

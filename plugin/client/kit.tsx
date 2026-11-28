@@ -79,9 +79,11 @@ export function useAct() {
       }
     },
     /** Resolves to the result, or null after showing the refusal. */
-    run: async (name: string, args: Record<string, unknown> = {}): Promise<any | null> => {
+    run: async (name: string, args: Record<string, unknown> = {}, done?: string): Promise<any | null> => {
       try {
-        return await m.mutateAsync({ name, args });
+        const r = await m.mutateAsync({ name, args });
+        if (done) toast.show(done);
+        return r;
       } catch (e: any) {
         toast.error(e?.code ? `${e.code}: ${e.message}` : String(e?.message ?? e));
         return null;
@@ -267,4 +269,21 @@ export const STATUS_TONE: Record<string, Tone> = {
 
 export function Empty({ text }: { text: string }) {
   return <T muted>{text}</T>;
+}
+
+/** A unified diff, coloured line by line. */
+export function DiffLines({ diff, max = 4000 }: { diff: string; max?: number }) {
+  const c = useColors();
+  return (
+    <View style={{ backgroundColor: c.surface0, borderColor: c.border, borderWidth: 1, borderRadius: 6, padding: 8 }}>
+      {diff.split("\n").slice(0, max).map((line, n) => {
+        const color = line.startsWith("+") && !line.startsWith("+++") ? c.statusSuccess : line.startsWith("-") && !line.startsWith("---") ? c.statusDanger : line.startsWith("@@") ? c.accent : line.startsWith("diff ") ? c.foreground : c.foregroundMuted;
+        return (
+          <Text key={n} selectable style={{ color, fontFamily: "monospace", fontSize: 12, fontWeight: line.startsWith("diff ") ? "600" : "400" }}>
+            {line || " "}
+          </Text>
+        );
+      })}
+    </View>
+  );
 }

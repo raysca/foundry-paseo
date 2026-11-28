@@ -107,6 +107,7 @@ export default function contribute(server: PluginServerContext) {
       issues: store.issues(),
       attempts: store.all("SELECT * FROM attempts ORDER BY id DESC LIMIT 200"),
       runs: store.all("SELECT * FROM runs ORDER BY id DESC LIMIT 200"),
+      comments: store.all("SELECT * FROM doc_comments ORDER BY id"),
       docs: store.all("SELECT * FROM feature_docs ORDER BY feature_id, kind"),
       requirements: store.all("SELECT * FROM requirements WHERE retired=0 ORDER BY feature_id, ref"),
       proposals: store.all("SELECT * FROM task_proposals WHERE status IN ('proposed','approved') ORDER BY id DESC LIMIT 50"),
@@ -214,7 +215,15 @@ export default function contribute(server: PluginServerContext) {
         case "feature.cut_task":
           return foundry.planning.cutTask(Number(args.id), String(args.ref), args.cut !== false);
         case "feature.revise":
-          return foundry.planning.revise(Number(args.id), args.kind, String(args.note ?? ""));
+          return foundry.planning.revise(Number(args.id), args.kind, String(args.note ?? ""), "you", (args.comments ?? []).map(Number));
+        case "feature.comment":
+          return foundry.planning.comment(Number(args.id), args.kind, String(args.sha ?? ""), Number(args.line), String(args.body ?? ""));
+        case "feature.delete_comment":
+          return foundry.planning.deleteComment(Number(args.comment));
+        case "feature.revisions":
+          return { revisions: await foundry.planning.revisions(Number(args.id), args.kind) };
+        case "feature.doc_diff":
+          return foundry.planning.docDiff(Number(args.id), args.kind, String(args.from ?? ""), String(args.to ?? ""));
         case "feature.edit_doc":
           return foundry.planning.editDoc(Number(args.id), args.kind, String(args.text ?? ""), String(args.base_sha ?? ""));
         case "feature.discard_change":

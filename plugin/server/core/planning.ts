@@ -10,7 +10,7 @@ import { diffRequirements, lintRequirements, renumbered, validateChangeSet, type
 import type { Host } from "./host";
 import type { Locks } from "./locks";
 import { FoundryError, TERMINAL_STATUSES, type Actor, type DocKind, type FeatureStage } from "./model";
-import { parse, type Feature, type Question, type Store } from "./store";
+import { parse, type DocComment, type Feature, type Question, type Store } from "./store";
 
 export interface PlanningSettings {
   questionWindowMs: number;
@@ -117,7 +117,7 @@ export class Planning {
     return [
       `You are Foundry's project manager, planning the feature "${f.title}". You work in the feature's integration worktree on ${f.branch}.`,
       `Write only under ${dir}/. Anything else you change is undone after your turn. Do not commit: Foundry commits your docs.`,
-      "Your Foundry tools: ask_questions (a Clarify round), propose_requirements (the spec's requirements), propose_tasks (the task graph).",
+      "Your Foundry tools: ask_questions (a Clarify round), propose_requirements (the spec's requirements), propose_tasks (the task graph), comment_on_doc (a comment on a line of spec.md, plan.md or tasks.md for the developer).",
     ].join("\n");
   }
 
@@ -136,8 +136,11 @@ export class Planning {
     return [
       `Step 2, Spec: write ${dir}/spec.md with ## Goal, ## User stories, ## Requirements, ## Out of scope and ## Decisions (include the developer's answers).`,
       "Call propose_requirements with the requirements (refs R1, R2, …, each with EARS acceptance criteria). If it returns errors, fix them and call it again. Foundry writes the ## Requirements section of spec.md from them, so leave that section to Foundry.",
-      `Then analyse the requirements for ambiguity, conflicts and gaps, and put the findings under ## Analysis.${end ? " End your turn." : ""}`,
-    ].join("\n");
+      "Then analyse the requirements for ambiguity, conflicts and gaps, and put the findings under ## Analysis. Where a line of the spec clashes with work already in flight in this project, leave a comment_on_doc on that line saying what it clashes with.",
+      end ? "End your turn." : "",
+    ]
+      .filter(Boolean)
+      .join("\n");
   }
 
   private planSteps(f: Feature) {
@@ -640,10 +643,12 @@ export class Planning {
   }
 
   /** A revision request: the PM revises the doc in the same stage; it waits for your approval again. */
-  async revise(featureId: number, kind: DocKind, note: string, actor: Actor = "you") {
-    if (!note.trim()) throw new FoundryError("FEEDBACK_REQUIRED", "A revision request needs a note");
+  async revise(featureId: number, kind: DocKind, note: string, actor: Actor = "you", commentIds: number[] = []) {
     const f = this.editable(featureId);
-    if (this.quick(f) && f.stage === "tasks") return this.reviseQuick(f, kind, note, actor);
+    const picked = this.pickComments(f, kind, commentIds);
+    if (!note.trim() && !picked.length) throw new FoundryError("FEEDBACK_REQUIRED", "A revision request needs a note or at least one comment");
+    note = revisionText(kind, note, picked);
+    if (this.quick(f) && f.stage === "tasks") return this.reviseQuick(f, kind, note, actor, picked);
     const stageOf: Record<DocKind, FeatureStage> = { spec: "spec", plan: "plan", tasks: "tasks" };
     if (f.stage !== stageOf[kind]) throw new FoundryError("WRONG_STAGE", `The feature is in ${f.stage}; the ${kind} can be revised in ${stageOf[kind]}`);
     const dir = featureDir(f.slug);
@@ -652,32 +657,120 @@ export class Planning {
       plan: `Revise ${dir}/plan.md.`,
       tasks: "Revise the task graph and call propose_tasks again. Do not write tasks.md.",
     };
-    this.store.event("revision_requested", { actor, project: f.project_id, feature: f.id, detail: { doc: kind, note } });
-    await this.runTurn(
-      f.id,
-      f.stage,
-      `The developer asks for a revision of the ${kind}:\n\n${note}\n\n${how[kind]} Do what the note asks; if it is unclear or conflicts with the doc, say so in your reply instead of reinterpreting it. End your turn.`,
-    );
-    return { ok: true };
+    this.store.tx(() => {
+      this.markSent(picked);
+      this.store.event("revision_requested", { actor, project: f.project_id, feature: f.id, detail: { doc: kind, note, comments: picked.map((c) => c.id) } });
+    });
+    await this.runTurn(f.id, f.stage, `${note}\n\n${how[kind]} ${DO_WHAT_IT_ASKS} End your turn.`);
+    return { ok: true, sent: picked.map((c) => c.id) };
+  }
+
+  /** Your saved comments on this doc, picked for a revision request. */
+  private pickComments(f: Feature, kind: DocKind, ids: number[]) {
+    const out: DocComment[] = [];
+    for (const id of ids) {
+      const c = this.store.comment(Number(id));
+      if (!c || c.feature_id !== f.id || c.doc !== kind) throw new FoundryError("NOT_FOUND", `No comment ${id} on this ${kind}`);
+      if (c.author !== "you" || c.status !== "saved") throw new FoundryError("COMMENT_SENT", `Comment ${id} was already sent`);
+      out.push(c);
+    }
+    return out;
+  }
+
+  private markSent(cs: DocComment[]) {
+    for (const c of cs) this.store.run("UPDATE doc_comments SET status='sent', sent_at=datetime('now') WHERE id=?", c.id);
+  }
+
+  /** A comment on a line of a doc at the SHA you read. It is saved, not sent, until a revision request takes it. */
+  async comment(featureId: number, kind: DocKind, sha: string, line: number, body: string, actor: Actor = "you") {
+    const f = this.store.feature(featureId);
+    if (!f) throw new FoundryError("NOT_FOUND", `No feature ${featureId}`);
+    if (f.status === "cancelled" || f.stage === "done") throw new FoundryError("FEATURE_CLOSED", `This feature is ${f.status === "cancelled" ? "cancelled" : "done"}`);
+    if (!body.trim()) throw new FoundryError("FEEDBACK_REQUIRED", "A comment needs some text");
+    const d = this.store.doc(f.id, kind)!;
+    if (!d.head_sha) throw new FoundryError("NOT_FOUND", `There is no ${kind} yet`);
+    if (d.head_sha !== sha) throw new FoundryError("STALE_REVIEW", "It changed since you read it", { head_sha: d.head_sha });
+    const lines = (await this.docAt(f, kind, sha)).split("\n");
+    if (!Number.isInteger(line) || line < 1 || line > lines.length) throw new FoundryError("LINE_INVALID", `Line ${line} is not in ${DOC_FILES[kind]} (it has ${lines.length})`);
+    const c = this.store.addComment({ featureId: f.id, doc: kind, sha, line, quote: lines[line - 1]!.slice(0, 200), body: body.trim(), author: "you" });
+    this.store.event("comment_saved", { actor, project: f.project_id, feature: f.id, detail: { doc: kind, line, comment: c.id } });
+    return c;
+  }
+
+  /** Delete one of your comments that has not been sent. */
+  deleteComment(id: number, actor: Actor = "you") {
+    const c = this.store.comment(id);
+    if (!c) throw new FoundryError("NOT_FOUND", `No comment ${id}`);
+    if (c.author !== "you" || c.status !== "saved") throw new FoundryError("COMMENT_SENT", "Only a comment you saved and haven't sent can be deleted");
+    this.store.run("DELETE FROM doc_comments WHERE id=?", id);
+    this.store.event("comment_deleted", { actor, feature: c.feature_id, detail: { comment: id } });
+    return { deleted: id };
+  }
+
+  /** comment_on_doc: the PM's comment on a line of a doc (a clash it found, or a reply to your comment). */
+  async pmComment(agentId: string, kind: DocKind, line: number, body: string) {
+    const f = this.plannerFeature(agentId);
+    if (!body.trim()) throw new FoundryError("FEEDBACK_REQUIRED", "A comment needs some text");
+    const file = join(f.integration_path!, featureDir(f.slug), DOC_FILES[kind]);
+    if (!existsSync(file)) throw new FoundryError("NOT_FOUND", `There is no ${DOC_FILES[kind]} yet; write it first`);
+    const lines = readFileSync(file, "utf8").split("\n");
+    if (!Number.isInteger(line) || line < 1 || line > lines.length) throw new FoundryError("LINE_INVALID", `Line ${line} is not in ${DOC_FILES[kind]} (it has ${lines.length})`);
+    // Comments stay put across the commit at the end of the turn: they name the line as written now.
+    const c = this.store.addComment({ featureId: f.id, doc: kind, sha: f.head_sha ?? "", line, quote: lines[line - 1]!.slice(0, 200), body: body.trim(), author: "pm", status: "sent" });
+    this.store.event("pm_commented", { actor: "pm", project: f.project_id, feature: f.id, detail: { doc: kind, line, comment: c.id } });
+    return { recorded: c.id };
+  }
+
+  /** Every commit that changed the doc, newest first. */
+  async revisions(featureId: number, kind: DocKind) {
+    const f = this.store.feature(featureId);
+    if (!f) throw new FoundryError("NOT_FOUND", `No feature ${featureId}`);
+    const d = this.store.doc(f.id, kind)!;
+    if (!d.head_sha || !f.integration_path) return [];
+    const rel = `${featureDir(f.slug)}/${DOC_FILES[kind]}`;
+    const out = await git(f.integration_path, "log", "--format=%H%x09%an%x09%cI%x09%s", d.head_sha, "--", rel).catch(() => "");
+    return out
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => {
+        const [sha, author, at, subject] = l.split("\t");
+        return { sha: sha!, author: author!, at: at!, subject: subject ?? "", approved: sha === d.approved_sha, head: sha === d.head_sha };
+      });
+  }
+
+  /** The diff of a doc between two of its revisions (older first). */
+  async docDiff(featureId: number, kind: DocKind, from: string, to: string) {
+    const revs = await this.revisions(featureId, kind);
+    const known = new Set(revs.map((r) => r.sha));
+    for (const x of [from, to]) if (!known.has(x)) throw new FoundryError("NOT_FOUND", `${x.slice(0, 10)} is not a revision of the ${kind}`);
+    const f = this.store.feature(featureId)!;
+    const rel = `${featureDir(f.slug)}/${DOC_FILES[kind]}`;
+    const diff = await git(f.integration_path!, "diff", from, to, "--", rel);
+    return { kind, from, to, diff };
+  }
+
+  private async docAt(f: Feature, kind: DocKind, sha: string) {
+    return git(f.integration_path!, "show", `${sha}:${featureDir(f.slug)}/${DOC_FILES[kind]}`).catch(() => "");
   }
 
   /** Quick flow: a revision of any doc is one turn that keeps all three consistent and re-proposes the tasks. */
-  private async reviseQuick(f: Feature, kind: DocKind, note: string, actor: Actor) {
+  private async reviseQuick(f: Feature, kind: DocKind, note: string, actor: Actor, picked: DocComment[]) {
     const dir = featureDir(f.slug);
     this.store.tx(() => {
       // The revised list must come from this turn.
       this.store.run("UPDATE task_proposals SET status='superseded' WHERE feature_id=? AND status='proposed'", f.id);
-      this.store.event("revision_requested", { actor, project: f.project_id, feature: f.id, detail: { doc: kind, note } });
+      this.markSent(picked);
+      this.store.event("revision_requested", { actor, project: f.project_id, feature: f.id, detail: { doc: kind, note, comments: picked.map((c) => c.id) } });
     });
     await this.runTurn(
       f.id,
       "quick",
       [
-        `The developer asks for a revision of the ${kind}:\n\n${note}`,
-        `Do what the note asks; if it is unclear or conflicts with the docs, say so in your reply instead of reinterpreting it. Keep ${dir}/spec.md (call propose_requirements again if requirements change, keeping unchanged refs) and ${dir}/plan.md consistent with the change, then call propose_tasks again with the full task graph. Do not write tasks.md. End your turn.`,
+        note,
+        `${DO_WHAT_IT_ASKS} Keep ${dir}/spec.md (call propose_requirements again if requirements change, keeping unchanged refs) and ${dir}/plan.md consistent with the change, then call propose_tasks again with the full task graph. Do not write tasks.md. End your turn.`,
       ].join("\n\n"),
     );
-    return { ok: true };
+    return { ok: true, sent: picked.map((c) => c.id) };
   }
 
   /** Run the stage's turn again after a failure. */
@@ -966,6 +1059,18 @@ export class Planning {
       this.failTurn(r.feature_id, "The project manager's last turn was cut off by a restart");
     }
   }
+}
+
+const DO_WHAT_IT_ASKS =
+  "Do what the note and each comment ask. If one is unclear or conflicts with the doc, reply to it with comment_on_doc on that line instead of reinterpreting it.";
+
+/** A revision request as the PM reads it: the note, then each comment with its line. */
+function revisionText(kind: DocKind, note: string, comments: DocComment[]) {
+  const parts = [`The developer asks for a revision of the ${kind}${DOC_FILES[kind] ? ` (${DOC_FILES[kind]})` : ""}.`];
+  if (note.trim()) parts.push(`Note:\n${note.trim()}`);
+  if (comments.length)
+    parts.push(`Comments on lines of the version they read:\n${comments.map((c) => `- line ${c.line} ("${c.quote.trim()}"): ${c.body}`).join("\n")}`);
+  return parts.join("\n\n");
 }
 
 function formatAnswers(a: Record<string, string>) {

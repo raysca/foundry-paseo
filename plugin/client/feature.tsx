@@ -6,7 +6,8 @@ import { Loading, Markdown, ScrollView, useToast } from "@getpaseo/plugin/client
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { actionRpc } from "../shared/rpc";
-import { Badge, Btn, Card, Choice, Empty, Field, go, Page, parseJson, Progress, Row, SCREEN, Section, short, STATUS_TONE, T, Themed, useAct, useFoundry, type State } from "./kit";
+import { Pressable, Text, View } from "react-native";
+import { Badge, Btn, Card, Choice, DiffLines, Empty, Field, go, Page, parseJson, Progress, Row, SCREEN, Section, short, STATUS_TONE, T, Themed, useAct, useColors, useFoundry, type State } from "./kit";
 
 export function FeatureScreen(props: PluginScreenProps) {
   return (
@@ -151,8 +152,12 @@ function DocView({ s, f, kind }: { s: State; f: any; kind: DocKind }) {
   const act = useAct();
   const d = s.docs.find((x) => x.feature_id === f.id && x.kind === kind)!;
   const doc = useQuery({ queryKey: ["foundry-doc", f.id, kind, d.head_sha], queryFn: () => action({ action: "feature.doc", args: { id: f.id, kind } }) as Promise<any> });
-  const [mode, setMode] = useState<"read" | "revise" | "edit">("read");
+  const [mode, setMode] = useState<"read" | "revise" | "edit" | "comment" | "history">("read");
   const [note, setNote] = useState("");
+  const comments = (s.comments ?? []).filter((c: any) => c.feature_id === f.id && c.doc === kind);
+  const saved = comments.filter((c: any) => c.author === "you" && c.status === "saved");
+  const [picked, setPicked] = useState<number[] | null>(null);
+  const chosen = picked ?? saved.map((c: any) => c.id);
   const [text, setText] = useState("");
   const proposal = s.proposals.find((p) => p.feature_id === f.id && p.status === "proposed");
   const data = doc.data && !doc.data.error ? doc.data : null;
@@ -191,20 +196,40 @@ function DocView({ s, f, kind }: { s: State; f: any; kind: DocKind }) {
         </>
       ) : !data ? (
         <Loading />
+      ) : mode === "comment" ? (
+        <DocLines f={f} kind={kind} sha={data.sha} text={data.text} comments={comments} />
+      ) : mode === "history" ? (
+        <History f={f} kind={kind} headSha={d.head_sha} />
       ) : (
         <Markdown>{data.text || "_Empty._"}</Markdown>
       )}
+      {comments.length && mode !== "comment" ? <CommentList comments={comments} /> : null}
       {mode === "revise" ? (
         <>
+          {saved.length ? (
+            <>
+              <T muted size={13}>Comments to send with it:</T>
+              {saved.map((c: any) => {
+                const on = chosen.includes(c.id);
+                return (
+                  <Row key={c.id} wrap>
+                    <Btn label={on ? "✓ Send" : "Don't send"} onPress={() => setPicked(on ? chosen.filter((x: number) => x !== c.id) : [...chosen, c.id])} />
+                    <T size={13}>line {c.line}: {c.body}</T>
+                  </Row>
+                );
+              })}
+            </>
+          ) : null}
           <Field value={note} onChange={setNote} placeholder={`What should change in ${kind}.md?`} multiline />
           <Row>
             <Btn
-              label="Send revision request"
+              label={chosen.length ? `Send revision request with ${chosen.length} comment${chosen.length === 1 ? "" : "s"}` : "Send revision request"}
               kind="primary"
-              disabled={!note.trim() || act.pending}
+              disabled={(!note.trim() && !chosen.length) || act.pending}
               onPress={async () => {
-                if (await act.run("feature.revise", { id: f.id, kind, note })) {
+                if (await act.run("feature.revise", { id: f.id, kind, note, comments: chosen })) {
                   setNote("");
+                  setPicked(null);
                   setMode("read");
                 }
               }}
@@ -218,6 +243,8 @@ function DocView({ s, f, kind }: { s: State; f: any; kind: DocKind }) {
           {d.status === "in_review" && (!quick || kind === "tasks") ? <Btn label={approveLabel} kind="primary" disabled={!canApprove || !data || act.pending} onPress={() => void approve()} /> : null}
           {d.status === "in_review" && quick && kind !== "tasks" ? <T muted size={12}>Quick flow: you approve the spec, plan and tasks together on tasks.md.</T> : null}
           {d.status === "in_review" ? <Btn label="Request a revision" onPress={() => setMode("revise")} /> : null}
+          {data ? <Btn label={saved.length ? `Comment on lines (${saved.length} not sent yet)` : "Comment on lines"} onPress={() => setMode("comment")} /> : null}
+          <Btn label="Revisions" onPress={() => setMode("history")} />
           {kind !== "tasks" && data ? (
             <Btn
               label="Edit"
@@ -229,8 +256,124 @@ function DocView({ s, f, kind }: { s: State; f: any; kind: DocKind }) {
           ) : null}
         </Row>
       ) : null}
+      {mode === "comment" || mode === "history" ? (
+        <Row>
+          {mode === "comment" && saved.length && d.status === "in_review" ? <Btn label="Send them as a revision request" kind="primary" onPress={() => setMode("revise")} /> : null}
+          <Btn label="Back to the doc" onPress={() => setMode("read")} />
+        </Row>
+      ) : null}
       {f.planning_busy && d.status === "in_review" ? <T muted size={12}>The project manager is still working; approval opens when its turn ends.</T> : null}
     </Card>
+  );
+}
+
+/** The doc as numbered lines: tap a line to comment on it. Comments are saved, not sent, until a revision request takes them. */
+function DocLines({ f, kind, sha, text, comments }: { f: any; kind: DocKind; sha: string; text: string; comments: any[] }) {
+  const c = useColors();
+  const act = useAct();
+  const [line, setLine] = useState<number | null>(null);
+  const [body, setBody] = useState("");
+  const onLine = (n: number) => comments.filter((x) => x.line === n && x.sha === sha);
+  return (
+    <View style={{ borderColor: c.border, borderWidth: 1, borderRadius: 6, padding: 6 }}>
+      {text.split("\n").map((l, i) => {
+        const n = i + 1;
+        const here = onLine(n);
+        return (
+          <View key={n}>
+            <Pressable onPress={() => setLine(line === n ? null : n)} style={{ flexDirection: "row", gap: 8, backgroundColor: line === n ? c.surface2 : here.length ? c.surface0 : "transparent" }}>
+              <Text style={{ color: c.foregroundMuted, fontFamily: "monospace", fontSize: 12, width: 32, textAlign: "right" }}>{n}</Text>
+              <Text selectable style={{ color: c.foreground, fontFamily: "monospace", fontSize: 12, flex: 1 }}>{l || " "}</Text>
+            </Pressable>
+            {here.map((x) => (
+              <CommentRow key={x.id} c={x} />
+            ))}
+            {line === n ? (
+              <View style={{ paddingLeft: 40, paddingVertical: 4, gap: 4 }}>
+                <Field value={body} onChange={setBody} placeholder={`Comment on line ${n}`} multiline />
+                <Row>
+                  <Btn
+                    label="Save comment"
+                    kind="primary"
+                    disabled={!body.trim() || act.pending}
+                    onPress={async () => {
+                      if (await act.run("feature.comment", { id: f.id, kind, sha, line: n, body }, "Comment saved, not sent yet")) {
+                        setBody("");
+                        setLine(null);
+                      }
+                    }}
+                  />
+                  <Btn label="Cancel" onPress={() => setLine(null)} />
+                </Row>
+              </View>
+            ) : null}
+          </View>
+        );
+      })}
+    </View>
+  );
+}
+
+function CommentRow({ c }: { c: any }) {
+  const act = useAct();
+  const who = c.author === "pm" ? "Project manager" : "You";
+  const state = c.author === "pm" ? "" : c.status === "saved" ? " · not sent yet" : " · sent";
+  return (
+    <View style={{ paddingLeft: 40, paddingVertical: 2 }}>
+      <Row wrap>
+        <Badge label={`${who}${state}`} tone={c.author === "pm" ? "info" : c.status === "saved" ? "warning" : "muted"} />
+        <T size={13}>{c.body}</T>
+        {c.author === "you" && c.status === "saved" ? <Btn label="Delete" onPress={() => void act.run("feature.delete_comment", { comment: c.id })} /> : null}
+      </Row>
+    </View>
+  );
+}
+
+function CommentList({ comments }: { comments: any[] }) {
+  return (
+    <>
+      <T bold size={13}>Comments ({comments.length})</T>
+      {comments.map((c) => (
+        <View key={c.id}>
+          <T muted size={12} mono>line {c.line} at {short(c.sha)}: {c.quote.trim() || "(blank line)"}</T>
+          <CommentRow c={c} />
+        </View>
+      ))}
+    </>
+  );
+}
+
+/** Every revision of the doc, with the diff between any two (older first). */
+function History({ f, kind, headSha }: { f: any; kind: DocKind; headSha: string }) {
+  const action = useRpc(actionRpc);
+  const revs = useQuery({ queryKey: ["foundry-revisions", f.id, kind, headSha], queryFn: () => action({ action: "feature.revisions", args: { id: f.id, kind } }) as Promise<any> });
+  const list: any[] = revs.data?.revisions ?? [];
+  const [from, setFrom] = useState<string | null>(null);
+  const [to, setTo] = useState<string | null>(null);
+  const a = from ?? list[1]?.sha ?? null;
+  const b = to ?? list[0]?.sha ?? null;
+  const diff = useQuery({
+    queryKey: ["foundry-doc-diff", f.id, kind, a, b],
+    enabled: !!a && !!b && a !== b,
+    queryFn: () => action({ action: "feature.doc_diff", args: { id: f.id, kind, from: a, to: b } }) as Promise<any>,
+  });
+  if (!revs.data) return <Loading />;
+  if (list.length < 2) return <T muted>Only one revision so far.</T>;
+  return (
+    <>
+      {list.map((r) => (
+        <Row key={r.sha} wrap>
+          <Btn label={r.sha === a ? "● from" : "from"} onPress={() => setFrom(r.sha)} />
+          <Btn label={r.sha === b ? "● to" : "to"} onPress={() => setTo(r.sha)} />
+          <T mono size={12}>{short(r.sha)}</T>
+          <T size={13}>{r.author}</T>
+          <T muted size={12}>{r.subject}</T>
+          {r.approved ? <Badge label="approved" tone="success" /> : null}
+          {r.head ? <Badge label="current" tone="info" /> : null}
+        </Row>
+      ))}
+      {a === b ? <T muted>Pick two different revisions.</T> : diff.data?.diff !== undefined ? <DiffLines diff={diff.data.diff || "(no change)"} /> : <Loading />}
+    </>
   );
 }
 
