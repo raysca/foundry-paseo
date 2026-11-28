@@ -9,6 +9,13 @@ export interface Change {
 
 export const CHANGES: Change[] = [
   {
+    version: "0.3.0",
+    notes: [
+      "Quick flow: pick it when you create a feature, and the project manager writes the spec, plan and task list in one turn. You approve all three at once.",
+      "Paseo now names the branches of Foundry's workspaces (for example shout-mode or sht-1) instead of Foundry's own foundry/... names.",
+    ],
+  },
+  {
     version: "0.2.0",
     notes: [
       "A welcome wizard sets Foundry up: pick the harness and model for each of Foundry's agent profiles, then a project.",

@@ -228,6 +228,14 @@ async function plan(s: Session, dir: string, text: string): Promise<string> {
     });
     return `Proposed the change set. ${r}`;
   }
+  // The Quick flow: Clarify (if a round is allowed), spec, plan and the task graph in one turn.
+  if (text.includes("Step 4, Tasks")) {
+    if (text.includes("Step 1, Clarify")) {
+      const ans = await call(s, "ask_questions", { questions: [{ id: "short_flag", text: "Should --shout also accept -s?", recommended: "yes" }] });
+      if (ans.startsWith("The developer hasn't answered")) return "Waiting for the developer's answers.";
+    }
+    return [await plan(s, dir, "Step 2"), await plan(s, dir, "plan.md with"), await plan(s, dir, "call propose_tasks")].join(" ");
+  }
   if (text.includes("call propose_tasks")) {
     const r = await call(s, "propose_tasks", {
       tasks: [

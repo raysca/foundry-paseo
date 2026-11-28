@@ -116,6 +116,7 @@ function NewFeature({ projectKey }: { projectKey: string }) {
   const [open, setOpen] = useState(false);
   const [idea, setIdea] = useState("");
   const [grill, setGrill] = useState<"none" | "light" | "normal">("light");
+  const [flow, setFlow] = useState<"standard" | "quick">("standard");
   if (!open) return <Row><Btn label="New feature" kind="primary" onPress={() => setOpen(true)} /></Row>;
   return (
     <Card>
@@ -123,8 +124,12 @@ function NewFeature({ projectKey }: { projectKey: string }) {
       <T muted size={13}>The first line is the title. The project manager can ask you Clarify questions before it writes the spec.</T>
       <Field value={idea} onChange={setIdea} placeholder={"Shout mode\nLet the CLI print its input in upper case."} multiline />
       <Row wrap>
+        <T muted size={13}>Flow:</T>
+        <Choice value={flow} onChange={setFlow} options={[{ value: "standard", label: "Standard (approve spec, plan, tasks)" }, { value: "quick", label: "Quick (one approval)" }]} />
+      </Row>
+      <Row wrap>
         <T muted size={13}>Questions:</T>
-        <Choice value={grill} onChange={setGrill} options={[{ value: "none", label: "None" }, { value: "light", label: "One round" }, { value: "normal", label: "Up to two rounds" }]} />
+        <Choice value={grill} onChange={setGrill} options={[{ value: "none", label: "None" }, { value: "light", label: "One round" }, ...(flow === "quick" ? [] : [{ value: "normal" as const, label: "Up to two rounds" }])]} />
       </Row>
       <Row>
         <Btn
@@ -132,7 +137,7 @@ function NewFeature({ projectKey }: { projectKey: string }) {
           kind="primary"
           disabled={!idea.trim() || act.pending}
           onPress={async () => {
-            const r = await act.run("feature.create", { project: projectKey, idea, grill });
+            const r = await act.run("feature.create", { project: projectKey, idea, grill: flow === "quick" && grill === "normal" ? "light" : grill, flow });
             if (r?.id) {
               setIdea("");
               setOpen(false);

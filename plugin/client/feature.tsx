@@ -52,6 +52,7 @@ function Header({ s, f, row, projectKey }: { s: State; f: any; row: any; project
       <Row wrap>
         <T bold size={18}>{f.title}</T>
         <Badge label={STAGE_NAME[f.stage] ?? f.stage} tone="info" />
+        {f.flow === "quick" ? <Badge label="quick flow" tone="muted" /> : null}
         {f.status !== "active" ? <Badge label={f.status} tone="warning" /> : null}
         {f.planning_busy ? <Badge label="project manager is working" tone="info" /> : null}
       </Row>
@@ -159,9 +160,13 @@ function DocView({ s, f, kind }: { s: State; f: any; kind: DocKind }) {
     if (!data) return;
     if (kind === "spec") await act.run("feature.approve_spec", { id: f.id, sha: data.sha });
     else if (kind === "plan") await act.run("feature.approve_plan", { id: f.id, sha: data.sha });
-    else if (proposal) await act.run("feature.approve_tasks", { id: f.id, proposal: proposal.id, sha: data.sha });
+    else if (proposal) await act.run("feature.approve_tasks", { id: f.id, proposal: proposal.id, sha: data.sha, ...(quick ? { spec_sha: docOf("spec")?.head_sha, plan_sha: docOf("plan")?.head_sha } : {}) });
   };
-  const canApprove = d.status === "in_review" && !f.planning_busy && (kind !== "tasks" || (proposal && proposal.tasks_sha));
+  // The Quick flow is approved once, at the task list, naming the spec and plan SHAs shown here too.
+  const quick = f.flow === "quick" && !["build", "verify", "ship", "done"].includes(f.stage);
+  const docOf = (k: DocKind) => s.docs.find((x) => x.feature_id === f.id && x.kind === k);
+  const canApprove = d.status === "in_review" && !f.planning_busy && (kind !== "tasks" || (proposal && proposal.tasks_sha)) && (!quick || kind === "tasks");
+  const approveLabel = quick ? `Approve spec ${short(docOf("spec")?.head_sha)}, plan ${short(docOf("plan")?.head_sha)} and tasks ${short(data?.sha)}` : `Approve ${kind}.md at ${short(data?.sha)}`;
   return (
     <Card>
       <Row wrap>
@@ -210,7 +215,8 @@ function DocView({ s, f, kind }: { s: State; f: any; kind: DocKind }) {
       ) : null}
       {mode === "read" ? (
         <Row wrap>
-          {d.status === "in_review" ? <Btn label={`Approve ${kind}.md at ${short(data?.sha)}`} kind="primary" disabled={!canApprove || !data || act.pending} onPress={() => void approve()} /> : null}
+          {d.status === "in_review" && (!quick || kind === "tasks") ? <Btn label={approveLabel} kind="primary" disabled={!canApprove || !data || act.pending} onPress={() => void approve()} /> : null}
+          {d.status === "in_review" && quick && kind !== "tasks" ? <T muted size={12}>Quick flow: you approve the spec, plan and tasks together on tasks.md.</T> : null}
           {d.status === "in_review" ? <Btn label="Request a revision" onPress={() => setMode("revise")} /> : null}
           {kind !== "tasks" && data ? (
             <Btn
