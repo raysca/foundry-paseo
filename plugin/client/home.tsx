@@ -28,6 +28,9 @@ const BUCKETS = [
 
 function Home({ projectKey }: { projectKey?: string }) {
   const q = useFoundry();
+  const [bucket, setBucket] = useState<"all" | (typeof BUCKETS)[number][0]>("all");
+  const [status, setStatus] = useState<"active" | "paused" | "cancelled" | "all">("active");
+  const [changedOnly, setChangedOnly] = useState(false);
   if (!q.data) return q.error ? <Page><T>Foundry isn't reachable: {String(q.error)}</T></Page> : <Loading />;
   const s = q.data;
   if (s.deleted) return <DataDeleted home={s.deleted} />;
@@ -35,8 +38,8 @@ function Home({ projectKey }: { projectKey?: string }) {
   const project = s.projects.find((p) => p.key === projectKey);
   if (!project) return <Page crumbs={[{ label: "Foundry", onPress: () => go(SCREEN.home) }]}><T>No Foundry project {projectKey}.</T></Page>;
   const rows = (s.overview.rows as any[]).filter((r) => r.project_id === project.id);
-  const live = rows.filter((r) => r.status === "active");
-  const other = rows.filter((r) => r.status !== "active");
+  const live = rows.filter((r) => (status === "all" ? true : r.status === status) && (!changedOnly || r.spec_changed));
+  const other = status === "active" && !changedOnly ? rows.filter((r) => r.status !== "active") : [];
   const proposedCards = s.cards.filter((c: any) => c.project_id === project.id && c.status === "proposed").length;
   return (
     <Page crumbs={[{ label: "Foundry", onPress: () => go(SCREEN.home) }, { label: project.name }]}>
@@ -48,7 +51,12 @@ function Home({ projectKey }: { projectKey?: string }) {
       <WhatsNew ob={s.onboarding} />
       <Setup setup={s.setup} />
       <NewFeature projectKey={project.key} />
-      {BUCKETS.map(([b, name]) => {
+      <Row wrap>
+        <Choice value={bucket} onChange={setBucket} options={[{ value: "all", label: "All" }, ...BUCKETS.map(([b, name]) => ({ value: b, label: name }))]} />
+        <Choice value={status} onChange={setStatus} options={[{ value: "active", label: "Active" }, { value: "paused", label: "Paused" }, { value: "cancelled", label: "Cancelled" }, { value: "all", label: "Any status" }]} />
+        <Choice value={changedOnly ? "changed" : "any"} onChange={(v) => setChangedOnly(v === "changed")} options={[{ value: "any", label: "Any spec" }, { value: "changed", label: "Spec changed" }]} />
+      </Row>
+      {BUCKETS.filter(([b]) => bucket === "all" || bucket === b).map(([b, name]) => {
         const list = live.filter((r) => r.bucket === b);
         return (
           <Section key={b} title={`${name} (${list.length})`}>

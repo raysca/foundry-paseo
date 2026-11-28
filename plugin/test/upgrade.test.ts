@@ -37,7 +37,9 @@ for (let k = 1; k < SCHEMA_VERSION; k++) {
     assert.equal(s.projects()[0]!.key, "SHT");
     assert.equal(s.feature(1)!.title, "Shout mode");
     assert.equal(s.issue("SHT-1")!.status, "Done");
-    assert.equal(s.projects()[0]!.ship_mode, "local_merge", "a project from before keeps merging locally");
+    // Projects from before schema 11 keep merging locally; one made at 11 or later has ship_mode already.
+    assert.equal(s.projects()[0]!.ship_mode, k < 11 ? "local_merge" : "pr", "a project from before keeps merging locally");
+    assert.equal(s.feature(1)!.round, 1, "a feature from before is on its first delivery");
     s.close();
     const b = backups(d);
     assert.equal(b.length, 1);
@@ -74,15 +76,15 @@ test("a failing migration rolls back: the version and data stay as they were, an
   const path = join(d, "foundry.db");
   const last = SCHEMA_VERSION - 1;
   atVersion(path, last);
-  // Something in the way of the last migration (it adds projects.ship_mode).
+  // Something in the way of the last migration (it adds features.round).
   const db = new DatabaseSync(path);
-  db.exec("ALTER TABLE projects ADD COLUMN ship_mode TEXT");
+  db.exec("ALTER TABLE features ADD COLUMN round TEXT");
   db.close();
   assert.throws(() => new Store(path), (e: any) => e.code === "MIGRATION_FAILED" && new RegExp(`unchanged at schema ${last}`).test(e.message));
   const after = new DatabaseSync(path);
   assert.equal((after.prepare("SELECT value FROM meta WHERE key='schema_version'").get() as any).value, String(last));
   assert.equal((after.prepare("SELECT COUNT(*) n FROM issues").get() as any).n, 1);
-  assert.equal((after.prepare("SELECT ship_mode FROM projects").get() as any).ship_mode, null, "no part of the failed migration stayed");
+  assert.equal((after.prepare("SELECT round FROM features").get() as any).round, null, "no part of the failed migration stayed");
   after.close();
   assert.equal(backups(d).length, 1);
 });

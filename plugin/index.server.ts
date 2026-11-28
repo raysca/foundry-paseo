@@ -190,6 +190,13 @@ export default function contribute(server: PluginServerContext) {
           return foundry.accept(String(args.key), String(args.head_sha), String(args.tree_sha), "you", String(args.feedback ?? ""));
         case "issue.rework":
           return foundry.tasks.rework(String(args.key), String(args.head_sha), String(args.tree_sha), String(args.feedback ?? ""));
+        case "issue.flag_draft":
+          return foundry.tasks.flagDraft(String(args.key));
+        case "issue.cancel_flagged": {
+          const r = await foundry.tasks.cancelAtReview(String(args.key), String(args.head_sha), String(args.tree_sha));
+          await foundry.delivery.checkBuildDone();
+          return r;
+        }
         case "issue.review":
           return foundry.tasks.review(String(args.key));
         case "issue.followup":
