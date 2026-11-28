@@ -156,7 +156,7 @@ export interface AgentRecord {
   created_at: string;
 }
 
-export type CommentStatus = "saved" | "sent";
+export type CommentStatus = "saved" | "sent" | "resolved";
 export interface DocComment {
   id: number;
   feature_id: number;
@@ -169,6 +169,7 @@ export interface DocComment {
   status: CommentStatus;
   created_at: string;
   sent_at: string | null;
+  resolved_at: string | null;
 }
 
 export interface Question {
@@ -400,6 +401,8 @@ export const MIGRATIONS: readonly string[] = [
      author TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'saved', created_at TEXT NOT NULL DEFAULT (datetime('now')),
      sent_at TEXT);
    CREATE INDEX doc_comments_feature ON doc_comments(feature_id, doc);`,
+  // 10: resolving a comment (status 'resolved', and when)
+  `ALTER TABLE doc_comments ADD COLUMN resolved_at TEXT;`,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;

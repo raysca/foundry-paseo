@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { Store } from "../server/core/store";
 import { Locks } from "../server/core/locks";
 import { TaskLoop } from "../server/core/taskloop";
-import { Planning } from "../server/core/planning";
+import { Planning, mapLine } from "../server/core/planning";
 import { FoundryError } from "../server/core/model";
 import { FakeHost, fixtureRepo, type Turn } from "./fake-host";
 
@@ -28,7 +28,8 @@ async function setup() {
     const dir = dirOf(t);
     if (t.text.includes("Step 2") || t.text.includes("revision of the spec")) {
       version++;
-      t.write(`${dir}/spec.md`, `# Spec v${version}\n\n## Goal\nShout.\n\n## Requirements\n\nR1\n`);
+      // v2 adds a line under the title and rewords the title; the rest only moves down.
+      t.write(`${dir}/spec.md`, version === 1 ? "# Spec v1\n\n## Goal\nShout.\n\n## Requirements\n\nR1\n" : `# Spec v${version}\nBy the CLI team.\n\n## Goal\nShout.\n\n## Requirements\n\nR1\n`);
       planning.proposeRequirements(t.agentId, REQS);
       // The PM flags a clash on the Goal line, and replies to a comment it finds unclear.
       if (version === 1) await planning.pmComment(t.agentId, "spec", 4, "Clashes with SHT-9, which also changes output casing.");
@@ -90,4 +91,37 @@ test("the doc lists its revisions and diffs any two; unknown SHAs are refused", 
   assert.match(d.diff, /\+# Spec v2/);
   await assert.rejects(planning.docDiff(f.id, "spec", "0".repeat(40), revs[0]!.sha), code("NOT_FOUND"));
   assert.equal(store.doc(f.id, "spec")!.head_sha, revs[0]!.sha);
+});
+
+test("mapLine follows a line through a zero-context diff", () => {
+  const diff = "@@ -1 +1,2 @@\n-# Spec v1\n+# Spec v2\n+By the CLI team.\n@@ -6,0 +8 @@\n+extra\n";
+  assert.equal(mapLine(diff, 1), null, "the changed line itself");
+  assert.equal(mapLine(diff, 3), 4, "moved down by the inserted line");
+  assert.equal(mapLine(diff, 6), 7);
+  assert.equal(mapLine(diff, 7), 9, "after a pure insertion");
+});
+
+test("open comments follow an unchanged line to the new revision; changed lines stay behind; resolve and open counts", async () => {
+  const { store, host, planning, f } = await setup();
+  const v1 = store.doc(f.id, "spec")!.head_sha!;
+  const pm = store.comments(f.id, "spec").find((c) => c.author === "pm")!;
+  assert.equal(pm.sha, v1, "the PM's comment is pinned to the commit that ended its turn");
+  const onTitle = await planning.comment(f.id, "spec", v1, 1, "Rename it.");
+  const onGoal = await planning.comment(f.id, "spec", v1, 3, "Say who shouts.");
+  assert.deepEqual(planning.openComments(f.id, "spec"), { drafts: 2, pm: 1 });
+  await planning.revise(f.id, "spec", "", "you", [onTitle.id]);
+  await host.idle();
+  const v2 = store.doc(f.id, "spec")!.head_sha!;
+  assert.notEqual(v2, v1);
+  assert.deepEqual([store.comment(onGoal.id)!.sha, store.comment(onGoal.id)!.line], [v2, 4], "an unchanged line carries over, one line down");
+  assert.deepEqual([store.comment(pm.id)!.sha, store.comment(pm.id)!.line], [v2, 5]);
+  assert.equal(store.comment(onTitle.id)!.sha, v1, "the reworded title line stays on v1");
+
+  assert.throws(() => planning.resolveComment(onGoal.id), code("COMMENT_NOT_SENT"));
+  planning.resolveComment(pm.id);
+  assert.equal(store.comment(pm.id)!.status, "resolved");
+  assert.deepEqual(planning.openComments(f.id, "spec"), { drafts: 1, pm: 0 });
+  // Open comments warn on approval but never block it.
+  await planning.approveSpec(f.id, v2);
+  assert.equal(store.doc(f.id, "spec")!.status, "approved");
 });

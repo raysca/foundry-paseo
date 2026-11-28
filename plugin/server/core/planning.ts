@@ -255,6 +255,11 @@ export class Planning {
       this.store.updateFeature(f.id, { head_sha: commit });
       await this.trackDocs(f.id, base, commit);
     }
+    for (const kind of ["spec", "plan", "tasks"] as DocKind[]) {
+      const at = this.store.doc(f.id, kind)?.head_sha;
+      if (at) this.store.run("UPDATE doc_comments SET sha=? WHERE feature_id=? AND doc=? AND sha=?", at, f.id, kind, PENDING);
+    }
+    await this.carryComments(f.id);
     return { reverted, commit };
   }
 
@@ -356,6 +361,32 @@ export class Planning {
     if (commit) this.store.updateFeature(f.id, { head_sha: commit });
     this.store.run("UPDATE task_proposals SET tasks_sha=? WHERE id=?", sha, proposalId);
     this.store.updateDoc(f.id, "tasks", { head_sha: sha, status: "in_review" });
+    await this.carryComments(f.id);
+  }
+
+  /**
+   * Open comments follow a doc to its new revision when their line is unchanged (same text, the diff
+   * only moved it). A comment whose line changed stays on the revision it was written on.
+   */
+  private async carryComments(featureId: number) {
+    const f = this.store.feature(featureId)!;
+    for (const kind of ["spec", "plan", "tasks"] as DocKind[]) {
+      const now = this.store.doc(f.id, kind)?.head_sha;
+      if (!now) continue;
+      const rel = `${featureDir(f.slug)}/${DOC_FILES[kind]}`;
+      const open = this.store.all<DocComment>("SELECT * FROM doc_comments WHERE feature_id=? AND doc=? AND status!='resolved' AND sha!=? AND sha!=?", f.id, kind, now, PENDING);
+      if (!open.length) continue;
+      const lines = (await this.docAt(f, kind, now)).split("\n");
+      const diffs = new Map<string, string | null>();
+      for (const c of open) {
+        if (!diffs.has(c.sha)) diffs.set(c.sha, await git(f.integration_path!, "diff", "-U0", c.sha, now, "--", rel).catch(() => null));
+        const diff = diffs.get(c.sha);
+        if (diff === null || diff === undefined) continue;
+        const to = mapLine(diff, c.line);
+        if (to === null || (lines[to - 1] ?? "").slice(0, 200) !== c.quote) continue;
+        this.store.run("UPDATE doc_comments SET sha=?, line=? WHERE id=?", now, to, c.id);
+      }
+    }
   }
 
   // ---------- tools ----------
@@ -697,6 +728,23 @@ export class Planning {
     return c;
   }
 
+  /** Resolve a sent comment or one of the PM's: it stays in the list, marked resolved, and stops counting as open. */
+  resolveComment(id: number, actor: Actor = "you") {
+    const c = this.store.comment(id);
+    if (!c) throw new FoundryError("NOT_FOUND", `No comment ${id}`);
+    if (c.status === "saved") throw new FoundryError("COMMENT_NOT_SENT", "Send or delete a comment you haven't sent; there's nothing to resolve yet");
+    if (c.status === "resolved") return c;
+    this.store.run("UPDATE doc_comments SET status='resolved', resolved_at=datetime('now') WHERE id=?", id);
+    this.store.event("comment_resolved", { actor, feature: c.feature_id, detail: { comment: id, doc: c.doc } });
+    return this.store.comment(id)!;
+  }
+
+  /** What approving now would leave open on a doc: your unsent comments and the PM's unresolved ones. Approval is not blocked by them. */
+  openComments(featureId: number, kind: DocKind) {
+    const all = this.store.comments(featureId, kind);
+    return { drafts: all.filter((c) => c.author === "you" && c.status === "saved").length, pm: all.filter((c) => c.author === "pm" && c.status === "sent").length };
+  }
+
   /** Delete one of your comments that has not been sent. */
   deleteComment(id: number, actor: Actor = "you") {
     const c = this.store.comment(id);
@@ -715,8 +763,8 @@ export class Planning {
     if (!existsSync(file)) throw new FoundryError("NOT_FOUND", `There is no ${DOC_FILES[kind]} yet; write it first`);
     const lines = readFileSync(file, "utf8").split("\n");
     if (!Number.isInteger(line) || line < 1 || line > lines.length) throw new FoundryError("LINE_INVALID", `Line ${line} is not in ${DOC_FILES[kind]} (it has ${lines.length})`);
-    // Comments stay put across the commit at the end of the turn: they name the line as written now.
-    const c = this.store.addComment({ featureId: f.id, doc: kind, sha: f.head_sha ?? "", line, quote: lines[line - 1]!.slice(0, 200), body: body.trim(), author: "pm", status: "sent" });
+    // Pinned to the commit that ends this turn (the line names the file as written now).
+    const c = this.store.addComment({ featureId: f.id, doc: kind, sha: PENDING, line, quote: lines[line - 1]!.slice(0, 200), body: body.trim(), author: "pm", status: "sent" });
     this.store.event("pm_commented", { actor: "pm", project: f.project_id, feature: f.id, detail: { doc: kind, line, comment: c.id } });
     return { recorded: c.id };
   }
@@ -852,6 +900,7 @@ export class Planning {
           this.store.event("spec_change_opened", { actor, project: f.project_id, feature: f.id, detail: { base: d.approved_sha } });
         }
       });
+      await this.carryComments(f.id);
       return { changed: true, sha: commit, building, quick: this.quick(f) && !building } as const;
     });
     if (r.changed && r.quick) {
@@ -1059,6 +1108,27 @@ export class Planning {
       this.failTurn(r.feature_id, "The project manager's last turn was cut off by a restart");
     }
   }
+}
+
+const PENDING = "pending";
+
+/**
+ * Where line `n` of the old side of a zero-context unified diff lands on the new side, or null when the
+ * line itself was changed or removed.
+ */
+export function mapLine(diff: string, n: number): number | null {
+  let delta = 0;
+  for (const m of diff.matchAll(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/gm)) {
+    const oldStart = Number(m[1]);
+    const oldLen = m[2] === undefined ? 1 : Number(m[2]);
+    const newLen = m[4] === undefined ? 1 : Number(m[4]);
+    // With oldLen 0 the hunk inserts after oldStart; otherwise it replaces oldStart..oldStart+oldLen-1.
+    const firstAfter = oldLen === 0 ? oldStart + 1 : oldStart + oldLen;
+    if (n < (oldLen === 0 ? oldStart + 1 : oldStart)) break;
+    if (oldLen > 0 && n < firstAfter) return null;
+    delta += newLen - oldLen;
+  }
+  return n + delta;
 }
 
 const DO_WHAT_IT_ASKS =

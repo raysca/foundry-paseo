@@ -156,6 +156,7 @@ function DocView({ s, f, kind }: { s: State; f: any; kind: DocKind }) {
   const [note, setNote] = useState("");
   const comments = (s.comments ?? []).filter((c: any) => c.feature_id === f.id && c.doc === kind);
   const saved = comments.filter((c: any) => c.author === "you" && c.status === "saved");
+  const pmOpen = comments.filter((c: any) => c.author === "pm" && c.status === "sent");
   const [picked, setPicked] = useState<number[] | null>(null);
   const chosen = picked ?? saved.map((c: any) => c.id);
   const [text, setText] = useState("");
@@ -203,7 +204,7 @@ function DocView({ s, f, kind }: { s: State; f: any; kind: DocKind }) {
       ) : (
         <Markdown>{data.text || "_Empty._"}</Markdown>
       )}
-      {comments.length && mode !== "comment" ? <CommentList comments={comments} /> : null}
+      {comments.length && mode !== "comment" ? <CommentList comments={comments} headSha={d.head_sha} /> : null}
       {mode === "revise" ? (
         <>
           {saved.length ? (
@@ -241,6 +242,11 @@ function DocView({ s, f, kind }: { s: State; f: any; kind: DocKind }) {
       {mode === "read" ? (
         <Row wrap>
           {d.status === "in_review" && (!quick || kind === "tasks") ? <Btn label={approveLabel} kind="primary" disabled={!canApprove || !data || act.pending} onPress={() => void approve()} /> : null}
+          {d.status === "in_review" && canApprove && (saved.length || pmOpen.length) ? (
+            <T muted size={12}>
+              ⚠ {[saved.length ? `${saved.length} comment${saved.length === 1 ? "" : "s"} not sent yet` : "", pmOpen.length ? `${pmOpen.length} from the project manager not resolved` : ""].filter(Boolean).join(", ")}. Approving leaves them open.
+            </T>
+          ) : null}
           {d.status === "in_review" && quick && kind !== "tasks" ? <T muted size={12}>Quick flow: you approve the spec, plan and tasks together on tasks.md.</T> : null}
           {d.status === "in_review" ? <Btn label="Request a revision" onPress={() => setMode("revise")} /> : null}
           {data ? <Btn label={saved.length ? `Comment on lines (${saved.length} not sent yet)` : "Comment on lines"} onPress={() => setMode("comment")} /> : null}
@@ -317,25 +323,34 @@ function DocLines({ f, kind, sha, text, comments }: { f: any; kind: DocKind; sha
 function CommentRow({ c }: { c: any }) {
   const act = useAct();
   const who = c.author === "pm" ? "Project manager" : "You";
-  const state = c.author === "pm" ? "" : c.status === "saved" ? " · not sent yet" : " · sent";
+  const state = c.status === "resolved" ? " · resolved" : c.author === "pm" ? "" : c.status === "saved" ? " · not sent yet" : " · sent";
   return (
     <View style={{ paddingLeft: 40, paddingVertical: 2 }}>
       <Row wrap>
-        <Badge label={`${who}${state}`} tone={c.author === "pm" ? "info" : c.status === "saved" ? "warning" : "muted"} />
-        <T size={13}>{c.body}</T>
+        <Badge label={`${who}${state}`} tone={c.status === "resolved" ? "muted" : c.author === "pm" ? "info" : c.status === "saved" ? "warning" : "muted"} />
+        <T size={13} muted={c.status === "resolved"}>{c.body}</T>
         {c.author === "you" && c.status === "saved" ? <Btn label="Delete" onPress={() => void act.run("feature.delete_comment", { comment: c.id })} /> : null}
+        {c.status === "sent" ? <Btn label="Resolve" onPress={() => void act.run("feature.resolve_comment", { comment: c.id })} /> : null}
       </Row>
     </View>
   );
 }
 
-function CommentList({ comments }: { comments: any[] }) {
+function CommentList({ comments, headSha }: { comments: any[]; headSha: string }) {
+  const open = comments.filter((c) => c.status !== "resolved");
+  const [all, setAll] = useState(false);
+  const shown = all ? comments : open;
   return (
     <>
-      <T bold size={13}>Comments ({comments.length})</T>
-      {comments.map((c) => (
+      <Row wrap>
+        <T bold size={13}>Comments ({open.length} open)</T>
+        {comments.length > open.length ? <Btn label={all ? "Hide resolved" : `Show ${comments.length - open.length} resolved`} onPress={() => setAll(!all)} /> : null}
+      </Row>
+      {shown.map((c) => (
         <View key={c.id}>
-          <T muted size={12} mono>line {c.line} at {short(c.sha)}: {c.quote.trim() || "(blank line)"}</T>
+          <T muted size={12} mono>
+            line {c.line}{c.sha === headSha ? "" : ` of an earlier revision (${short(c.sha)}), since changed`}: {c.quote.trim() || "(blank line)"}
+          </T>
           <CommentRow c={c} />
         </View>
       ))}
