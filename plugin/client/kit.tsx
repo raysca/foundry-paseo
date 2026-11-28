@@ -36,6 +36,7 @@ export type State = Record<string, any> & {
   docs: any[];
   requirements: any[];
   proposals: any[];
+  slices: any[];
   questions: any[];
   verifications: any[];
   chat: any[];

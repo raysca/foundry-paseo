@@ -7,7 +7,7 @@ import { dirname, join } from "node:path";
 import { ensureIntegration, featureDir, reopenOnBase, steering, uniqueSlug, type Reopened } from "./features";
 import { firstRemote } from "./github";
 import { changedPaths, commitAll, FOUNDRY_IDENT, git, head, HOST_IDENT, PM_IDENT, sh } from "./git";
-import { diffRequirements, lintRequirements, renumbered, validateChangeSet, type RequirementDiff, renderRequirements, withRequirements, renderTasks, validateTasks, type GraphResult, type ProposedRequirement, type ProposedTask } from "./graph";
+import { diffRequirements, lintRequirements, renumbered, validateChangeSet, type RequirementDiff, renderRequirements, withRequirements, renderTasks, validateTasks, validateSlices, type GraphResult, type ProposedRequirement, type ProposedSlice, type ProposedTask, type SliceResult } from "./graph";
 import type { Host } from "./host";
 import type { Locks } from "./locks";
 import { FoundryError, TERMINAL_STATUSES, type Actor, type DocKind, type FeatureStage } from "./model";
@@ -160,6 +160,7 @@ export class Planning {
     return [
       "call propose_tasks with the task graph.",
       "Each task has a ref (T1, T2, …), title, description, exit_criteria, requirement_refs (together they must cover every requirement), depends_on (task refs, each with a reason), touches (paths from the plan), size (S, M or L) and checks.scripts (names of paseo.json scripts).",
+      "Group the tasks into slices when the feature is more than a handful of tasks: slices: [{n, title, goal}] and a slice number on each task. Slices ship in order (1 first), each as its own PR with its own Verify, so each slice must deliver working behaviour on its own (thin and end to end, not all the backend first). A task depends only on tasks in its own or an earlier slice. Aim for at most 8 tasks per slice and 4 slices per feature; a feature bigger than that should be split into separate features. A small feature is one slice: leave slices out.",
       "Do not write tasks.md; Foundry writes it. If propose_tasks returns errors, fix them and call it again.",
     ].join("\n");
   }
@@ -352,10 +353,11 @@ export class Planning {
 
   /** Foundry writes tasks.md from the current proposal and commits it; its SHA is what approval names. */
   private async writeTasksDoc(f: Feature, proposalId: number) {
-    const prop = this.store.get<{ tasks: string; result: string; cut: string }>("SELECT tasks,result,cut FROM task_proposals WHERE id=?", proposalId)!;
+    const prop = this.store.get<{ tasks: string; result: string; cut: string; slices: string; kind: string }>("SELECT tasks,result,cut,slices,kind FROM task_proposals WHERE id=?", proposalId)!;
     const file = join(f.integration_path!, featureDir(f.slug), DOC_FILES.tasks);
     mkdirSync(dirname(file), { recursive: true });
-    writeFileSync(file, renderTasks(f.title, parse<ProposedTask[]>(prop.tasks, []), parse<GraphResult>(prop.result, {} as GraphResult), parse<string[]>(prop.cut, [])));
+    const slices = prop.kind === "change" ? [] : (this.proposalSlices(f, prop) ?? []);
+    writeFileSync(file, renderTasks(f.title, parse<ProposedTask[]>(prop.tasks, []), parse<GraphResult>(prop.result, {} as GraphResult), parse<string[]>(prop.cut, []), slices));
     const before = f.head_sha!;
     const commit = await commitAll(f.integration_path!, `${f.slug}: tasks.md from proposal ${proposalId}`, FOUNDRY_IDENT);
     const sha = commit ?? before;
@@ -496,15 +498,91 @@ export class Planning {
   }
 
   /** propose_tasks: validates the graph; the list is recorded only when it passes. */
-  proposeTasks(agentId: string, tasks: ProposedTask[]) {
+  proposeTasks(agentId: string, tasks: ProposedTask[], slices: ProposedSlice[] = []) {
     const f = this.plannerFeature(agentId);
     if (this.turns.get(f.id)!.stage === "change_set") return this.proposeChangeSet(f, tasks);
     if (f.stage !== "tasks" && this.turns.get(f.id)!.stage !== "quick") throw new FoundryError("TOOL_REFUSED", "Tasks are proposed once the plan is approved, or in a change turn");
     const reqs = this.store.requirements(f.id).map((r) => r.ref);
-    const result = validateTasks(tasks, reqs, this.unfinishedIssues(f));
-    const prop = this.store.addProposal(f.id, tasks, result);
-    this.store.event("tasks_proposed", { actor: "pm", project: f.project_id, feature: f.id, detail: { proposal: prop.id, tasks: tasks.length, warnings: result.warnings.length } });
-    return { recorded: true, proposal: prop.id, waves: result.waves, critical_path: result.critical_path, warnings: result.warnings };
+    const graph = validateTasks(tasks, reqs, this.unfinishedIssues(f));
+    const sl = validateSlices(f.title, slices, tasks);
+    const result = { ...graph, warnings: [...graph.warnings, ...sl.warnings] };
+    const declared = sl.slices.map(({ n, title, goal }) => ({ n, title, goal }));
+    const prop = this.store.addProposal(f.id, tasks, result, "initial", declared);
+    this.store.event("tasks_proposed", { actor: "pm", project: f.project_id, feature: f.id, detail: { proposal: prop.id, tasks: tasks.length, slices: declared.length, warnings: result.warnings.length } });
+    return { recorded: true, proposal: prop.id, waves: result.waves, critical_path: result.critical_path, slices: sl.slices.map((x) => ({ n: x.n, title: x.title, tasks: x.tasks, requirements: x.requirement_refs })), warnings: result.warnings };
+  }
+
+  /** The slices of a proposal as they stand (with your edits and cuts), or null when they don't validate. */
+  private proposalSlices(f: Feature, prop: { tasks: string; cut: string; slices: string }): SliceResult[] | null {
+    try {
+      return validateSlices(f.title, parse<ProposedSlice[]>(prop.slices, []), parse<ProposedTask[]>(prop.tasks, []), parse<string[]>(prop.cut, [])).slices;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Your edits to the slices of the task list before you approve it: move a task to another slice (one
+   * past the last makes a new slice), move a slice to another place in the merge order, merge one slice
+   * into another, or rename one. Empty slices go and the rest are renumbered; tasks.md is rewritten.
+   */
+  async editSlices(
+    featureId: number,
+    op: { kind: "move_task"; ref: string; slice: number } | { kind: "move_slice"; from: number; to: number } | { kind: "merge"; from: number; into: number } | { kind: "rename"; slice: number; title: string; goal?: string },
+    actor: Actor = "you",
+  ) {
+    return this.locks.with(`feature:${featureId}`, async () => {
+      const f = this.editable(featureId);
+      if (f.stage !== "tasks") throw new FoundryError("WRONG_STAGE", `The feature is in ${f.stage}, not Tasks`);
+      const prop = this.store.proposal(f.id);
+      if (!prop || prop.kind === "change") throw new FoundryError("NO_PROPOSAL", "There is no task list to edit");
+      const tasks = parse<ProposedTask[]>(prop.tasks, []);
+      let slices = parse<ProposedSlice[]>(prop.slices, []);
+      if (!slices.length) slices = [{ n: 1, title: f.title }];
+      const has = (n: number) => slices.some((x) => x.n === n);
+      if (op.kind === "move_task") {
+        const t = tasks.find((x) => x.ref === op.ref);
+        if (!t) throw new FoundryError("NOT_FOUND", `No task ${op.ref}`);
+        if (op.slice === slices.length + 1) slices.push({ n: op.slice, title: `Slice ${op.slice}` });
+        else if (!has(op.slice)) throw new FoundryError("SLICE_INVALID", `There is no slice ${op.slice}`);
+        t.slice = op.slice;
+      } else if (op.kind === "move_slice") {
+        if (!has(op.from) || !has(op.to)) throw new FoundryError("SLICE_INVALID", "No such slice");
+        const order = slices.map((x) => x.n);
+        order.splice(order.indexOf(op.from), 1);
+        order.splice(op.to - 1, 0, op.from);
+        const to = new Map(order.map((n, i) => [n, i + 1]));
+        for (const t of tasks) t.slice = to.get(t.slice ?? 1);
+        slices = slices.map((x) => ({ ...x, n: to.get(x.n)! }));
+      } else if (op.kind === "merge") {
+        if (!has(op.from) || !has(op.into) || op.from === op.into) throw new FoundryError("SLICE_INVALID", "Merge one slice into another");
+        for (const t of tasks) if ((t.slice ?? 1) === op.from) t.slice = op.into;
+      } else {
+        const sl = slices.find((x) => x.n === op.slice);
+        if (!sl || !op.title.trim()) throw new FoundryError("SLICE_INVALID", "Name an existing slice and give it a title");
+        sl.title = op.title.trim();
+        if (op.goal !== undefined) sl.goal = op.goal;
+      }
+      // Drop empty slices and renumber 1..k in order.
+      const cut = parse<string[]>(prop.cut, []);
+      const used = new Set(tasks.filter((t) => !cut.includes(t.ref)).map((t) => t.slice ?? 1));
+      const kept = slices.filter((x) => used.has(x.n)).sort((a, b) => a.n - b.n);
+      const renum = new Map(kept.map((x, i) => [x.n, i + 1]));
+      for (const t of tasks) if (renum.has(t.slice ?? 1)) t.slice = renum.get(t.slice ?? 1);
+      slices = kept.map((x) => ({ ...x, n: renum.get(x.n)! }));
+      let result = parse<GraphResult>(prop.result, {} as GraphResult);
+      try {
+        const graph = validateTasks(tasks.map((t) => ({ ...t, depends_on: (t.depends_on ?? []).filter((d) => !cut.includes(d.ref)) })), this.store.requirements(f.id).map((r) => r.ref), this.unfinishedIssues(f), cut);
+        result = { ...graph, warnings: [...graph.warnings, ...validateSlices(f.title, slices, tasks, cut).warnings] };
+      } catch (e) {
+        if (!(e instanceof FoundryError)) throw e;
+        result = { ...result, warnings: ((e.detail.errors as string[]) ?? [e.message]).map((x) => `Blocks approval: ${x}`) };
+      }
+      this.store.run("UPDATE task_proposals SET tasks=?, slices=?, result=? WHERE id=?", JSON.stringify(tasks), JSON.stringify(slices), JSON.stringify(result), prop.id);
+      this.store.event("slices_edited", { actor, project: f.project_id, feature: f.id, detail: { proposal: prop.id, ...op } });
+      await this.writeTasksDoc(this.store.feature(f.id)!, prop.id);
+      return { proposal: prop.id, tasks_sha: this.store.doc(f.id, "tasks")!.head_sha, slices };
+    });
   }
 
   private unfinishedIssues(f: Feature) {
@@ -587,12 +665,13 @@ export class Planning {
       // Dependents of a cut task lose that edge reason-wise; coverage is checked at approval.
       let result: GraphResult;
       try {
-        result = validateTasks(
+        const graph = validateTasks(
           tasks.map((t) => ({ ...t, depends_on: (t.depends_on ?? []).filter((d) => !cuts.has(d.ref)) })),
           this.store.requirements(f.id).map((r) => r.ref),
           this.unfinishedIssues(f),
           [...cuts],
         );
+        result = { ...graph, warnings: [...graph.warnings, ...validateSlices(f.title, parse<ProposedSlice[]>(prop.slices, []), tasks, [...cuts]).warnings] };
       } catch (e) {
         if (!(e instanceof FoundryError)) throw e;
         result = { ...parse<GraphResult>(prop.result, {} as GraphResult), warnings: [...((e.detail.errors as string[]) ?? []).map((x) => `Blocks approval: ${x}`)] };
@@ -627,9 +706,24 @@ export class Planning {
       const tasks = all.map((t) => ({ ...t, depends_on: (t.depends_on ?? []).filter((d) => !cut.includes(d.ref)) }));
       const reqs = this.store.requirements(f.id).map((r) => r.ref);
       const g = validateTasks(tasks, reqs, this.unfinishedIssues(f), cut);
+      const sl = validateSlices(f.title, parse<ProposedSlice[]>(prop.slices, []), all, cut).slices;
       const byRef = new Map(tasks.map((t) => [t.ref, t]));
       return this.store.tx(() => {
         const keyOf = new Map<string, string>();
+        // The slices, in merge order. Slice 1 builds on the feature branch; later slices wait their turn.
+        const sliceId = new Map<number, number>();
+        for (const x of sl)
+          sliceId.set(
+            x.n,
+            this.store.addSlice(f.id, {
+              n: x.n,
+              title: x.title,
+              goal: x.goal,
+              requirementRefs: x.requirement_refs,
+              status: x.n === 1 ? "building" : "planned",
+              ...(x.n === 1 ? { branch: f.branch, workspaceId: f.integration_workspace_id, path: f.integration_path, headSha: f.head_sha } : {}),
+            }).id,
+          );
         for (const wave of g.waves)
           for (const ref of wave) {
             const t = byRef.get(ref)!;
@@ -651,6 +745,7 @@ export class Planning {
               touches: t.touches ?? [],
               requirementRefs: t.requirement_refs ?? [],
               profile: t.profile ?? null,
+              sliceId: sliceId.get(t.slice ?? 1) ?? null,
               actor,
             });
             deps.forEach((d, n) => this.store.addDep(i.key, depKeys[n]!, d.reason ?? ""));
@@ -929,6 +1024,19 @@ export class Planning {
     return r;
   }
 
+  /** The slice a task added after approval joins: the one it names if that hasn't shipped, else the last open slice. */
+  private sliceFor(featureId: number, n?: number) {
+    const named = n ? this.store.slices(featureId).find((x) => x.n === n && !["shipped", "cancelled"].includes(x.status)) : undefined;
+    const open = named ?? this.store.openSlice(featureId);
+    if (open) return open.id;
+    // Every slice has shipped (a reopened Done feature): the new work is a new slice at the end, on the feature's new branch.
+    const all = this.store.slices(featureId);
+    if (!all.length) return null;
+    const f = this.store.feature(featureId)!;
+    const k = all.at(-1)!.n + 1;
+    return this.store.addSlice(featureId, { n: k, title: `${f.title}, round ${f.round}`, status: "building", branch: f.branch, workspaceId: f.integration_workspace_id, path: f.integration_path, headSha: f.head_sha }).id;
+  }
+
   private approvedList(featureId: number) {
     return this.store.approvedRequirements(featureId).map((r) => ({ ref: r.ref, title: r.title, criteria: parse<string[]>(r.criteria, []) }));
   }
@@ -1047,6 +1155,7 @@ export class Planning {
               touches: t.touches ?? [],
               requirementRefs: t.requirement_refs ?? [],
               profile: t.profile ?? null,
+              sliceId: this.sliceFor(f.id, t.slice),
               actor,
             });
             deps.forEach((d, n) => this.store.addDep(i.key, depKeys[n]!, d.reason ?? ""));

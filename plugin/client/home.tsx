@@ -94,7 +94,8 @@ function ShipMode({ project }: { project: any }) {
 }
 
 function FeatureCard({ r }: { r: any }) {
-  const label = r.delivery_label ?? r.planning_label ?? (r.progress.percent != null ? `${r.progress.percent}% · ${r.progress.done} of ${r.progress.total} tasks done` : r.stage);
+  const base = r.delivery_label ?? r.planning_label ?? (r.progress.percent != null ? `${r.progress.percent}% · ${r.progress.done} of ${r.progress.total} tasks done` : r.stage);
+  const label = r.slices?.total > 1 && r.slices.front ? `Slice ${r.slices.front} of ${r.slices.total} · ${base}` : base;
   return (
     <Card onPress={() => go(SCREEN.feature, { id: String(r.id) })}>
       <Row wrap>
