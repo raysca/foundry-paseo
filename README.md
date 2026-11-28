@@ -17,6 +17,30 @@ SHA-bound reviews, cards and the ledger, in a SQLite store inside the plugin pro
 The behaviour spec and the milestone plan live in the project's Claude Docs. This repo is built
 milestone by milestone: Milestone 1 is a thin vertical slice of both loops and the PM, and Milestone 2
 completes loop 1 (the Quick flow, line comments, editing a spec at any stage, Ship by GitHub PR).
+Milestone 3 adds task flows to loop 2, described below.
+
+## Task flows
+
+Each task runs through a loop: its steps and their limits, frozen on the attempt when it starts.
+
+- **Built-in loops.** `backend` (build, check, review), `frontend` (adds a page step), `bugfix` (adds a
+  repro step) and `docs` (no project checks). The project manager picks one per task; change it on the
+  proposed task list or on a task that isn't running, and set a project default on the project page.
+- **Project loops.** A `.foundry/loops/<name>.yaml` on base adds a loop with the same step kinds
+  (`agent`, `check`, `repro`, `page`, `review`). Copy a built-in and edit it; an invalid file is listed
+  on the project page with its errors.
+- **Repro.** On `bugfix`, Foundry runs the new test with the fix reverted (it must fail) and with it (it
+  must pass), and review shows both runs. Otherwise the task is flagged `REPRO_FAILED`.
+- **Page checks.** On `frontend`, Foundry starts the project's `paseo.json` service through Paseo and
+  runs its `page-check` script with `FOUNDRY_PAGE_URL`, `FOUNDRY_PAGES` and `FOUNDRY_SCREENSHOTS`. The
+  script owns the browser; the screenshots it saves show at review. Failure is `PAGE_CHECK_FAILED`.
+- **Supervision.** A silent (15 min) or overlong (60 min) turn is interrupted, then stopped. Timeouts and
+  infrastructure errors are retried with backoff (twice by default), then Blocked. Repeated
+  infrastructure errors pause auto-start until you resume it. Paseo's permission card stays where you
+  answer permissions; Foundry only shows that a task waits on one.
+- **Quick tasks.** One task with no spec, from the project page or the PM, on its own branch from base,
+  shipped on its own: its own PR, or a local merge. Discovered work a builder or reviewer reports lands
+  in Backlog. Messages to a running builder queue for its next turn and can be taken back until sent.
 
 ## Layout
 
@@ -54,6 +78,9 @@ bash e2e/slices.sh                # slices exit test: three slices as stacked PR
 bash e2e/pages.sh                 # page checks: a frontend task's page step against its Paseo service, with a screenshot
 bash e2e/supervision.sh           # supervision: a silent builder is stopped and retried, and the retry passes
 bash e2e/quicktasks.sh            # quick tasks: one ships as its own PR; discovered work lands in Backlog
+bash e2e/flows.sh                 # M3 exit test: a task list on frontend and bugfix with one loop changed before approving,
+                                  # a page check with its screenshot, a repro, a project loop whose silent builder is
+                                  # retried, and a quick task shipped as its own PR
 bash e2e/exit.sh                  # M1 exit test: loop 1 with a spec edit during Build, through Verify and Ship
 bash e2e/ui.sh                    # the same scenario clicked through Foundry's screens in Paseo's web app (needs Playwright)
 ```
