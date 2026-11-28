@@ -200,6 +200,11 @@ async function script(s: Session, text: string): Promise<string> {
     log(`going silent on ${task[1]}`);
     return new Promise<string>(() => {});
   }
+  // The quick tasks e2e test: a builder that also reports work outside its task.
+  if (task && /\(report discovered work\)/.test(task[2]!) && !reported.has(task[1]!)) {
+    reported.add(task[1]!);
+    await call(s, "report_discovered_work", { title: "poc/fail_once.sh leaves a marker file behind", description: "It writes .fail_once in the worktree and never cleans it up.", why: "A stale marker makes the check pass on the first run." });
+  }
   if (task && /shout\(\)/.test(task[2]!)) {
     write(cwd, "shout/core.py", "def shout(text):\n    return text.upper() + \"!\"\n");
     write(cwd, "tests/test_core.py", "import unittest\n\nfrom shout.core import shout\n\n\nclass ShoutTest(unittest.TestCase):\n    def test_shout(self):\n        self.assertEqual(shout(\"hi\"), \"HI!\")\n");
@@ -307,6 +312,7 @@ const LOUD_REQ = { ref: "R3", title: "Loud alias", acceptance_criteria: ["WHERE 
 
 const failedOnce = new Set<string>();
 const silenced = new Set<string>();
+const reported = new Set<string>();
 const SLICED = process.env.FAKE_SLICES === "1";
 
 function implementLoud(cwd: string) {

@@ -13,6 +13,7 @@ import { TaskLoop, type LoopSettings } from "./taskloop";
 import { Planning } from "./planning";
 import { Delivery } from "./delivery";
 import { ProjectManager } from "./pm";
+import { QuickTasks } from "./quick";
 
 export interface FoundryConfig {
   /** Where Foundry keeps its own files (store). Worktrees are Paseo's. */
@@ -32,6 +33,7 @@ export class Foundry {
   readonly planning: Planning;
   readonly delivery: Delivery;
   readonly pm: ProjectManager;
+  readonly quick: QuickTasks;
   private lastTriage = 0;
   private lastPrCheck = 0;
   private timer: NodeJS.Timeout | null = null;
@@ -99,6 +101,8 @@ export class Foundry {
       () => this.tick(),
     );
     this.pm = new ProjectManager(store, host, this.locks, this.tasks, () => this.requireSetup());
+    this.quick = new QuickTasks(store, host, this.locks, this.tasks);
+    this.pm.quick = this.quick;
   }
 
   /** One scheduler pass: start Ready work, move features whose Build has ended to Verify, and every
@@ -110,6 +114,7 @@ export class Foundry {
     if (Date.now() - this.lastPrCheck >= (this.cfg.prPollMs ?? 5 * 60_000)) {
       this.lastPrCheck = Date.now();
       await this.delivery.refreshPrs();
+      await this.quick.refreshPrs();
     }
     if (Date.now() - this.lastTriage >= 30_000) {
       this.lastTriage = Date.now();
@@ -118,7 +123,10 @@ export class Foundry {
   }
 
   /** Accept a task; the last accepted task of a feature ends its Build. */
-  async accept(key: string, headSha: string, treeSha: string, actor: Actor = "you", feedback = "") {
+  async accept(key: string, headSha: string, treeSha: string, actor: Actor = "you", feedback = "", o: { confirmCheckedOut?: boolean } = {}) {
+    const i = this.store.issue(key);
+    // A quick task ships on its own: a PR into base, or a local merge.
+    if (i && !i.feature_id) return this.quick.accept(key, headSha, treeSha, { ...o, feedback }, actor);
     const r = await this.tasks.accept(key, headSha, treeSha, actor, feedback);
     await this.delivery.checkBuildDone();
     return r;

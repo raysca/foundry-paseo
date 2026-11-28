@@ -233,5 +233,41 @@ export function buildTools(f: Foundry): ToolSet {
     },
   });
 
-  return { builder: [askHuman, verdict("builder")], reviewer: [verdict("reviewer"), reportRequirements], planner: [askQuestions, proposeRequirements, proposeTasks, commentOnDoc], pm: pmTools };
+  const discovered = (role: "builder" | "reviewer") =>
+    defineAgentTool({
+      name: "report_discovered_work",
+      title: "Report discovered work",
+      description:
+        "Report work you found that is outside your task (a bug nearby, missing tests, a needed refactor). It becomes a task in Backlog for the developer to triage; don't do it yourself. Carry on with your own task.",
+      input: z.object({ title: z.string().min(1), description: z.string().min(1), why: z.string().optional() }),
+      async execute(input, { agent }) {
+        try {
+          guardRole(f, agent.id, role);
+          return ok(f.quick.discover(agent.id, input));
+        } catch (e) {
+          return refusal(e);
+        }
+      },
+    });
+  const createQuickTask = defineAgentTool({
+    name: "create_quick_task",
+    title: "Create a quick task",
+    description: "Create a small task with no feature (a fix or a chore). It lands in Backlog; the developer starts it from the board, and it ships on its own.",
+    input: z.object({ title: z.string().min(1), description: z.string().optional(), loop: z.string().optional() }),
+    async execute(input, { agent }) {
+      try {
+        guardRole(f, agent.id, "pm");
+        return ok(await f.pm.createQuickTask(agent.id, input));
+      } catch (e) {
+        return refusal(e);
+      }
+    },
+  });
+
+  return {
+    builder: [askHuman, verdict("builder"), discovered("builder")],
+    reviewer: [verdict("reviewer"), reportRequirements, discovered("reviewer")],
+    planner: [askQuestions, proposeRequirements, proposeTasks, commentOnDoc],
+    pm: [...pmTools, createQuickTask],
+  };
 }

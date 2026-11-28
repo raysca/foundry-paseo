@@ -592,7 +592,7 @@ async function cleanTo(path: string, sha: string) {
   await git(path, "clean", "-fdq");
 }
 
-async function mergeInto(path: string, sha: string, message: string) {
+export async function mergeInto(path: string, sha: string, message: string) {
   const m = await sh("git", [...FOUNDRY_IDENT, "merge", "--no-ff", "-q", "-m", message, sha], { cwd: path, env: identEnv(FOUNDRY_IDENT) });
   if (m.code !== 0) {
     const conflicts = (await git(path, "diff", "--name-only", "--diff-filter=U").catch(() => "")).split("\n").filter(Boolean);
@@ -602,7 +602,7 @@ async function mergeInto(path: string, sha: string, message: string) {
   return head(path);
 }
 
-function real(p: string) {
+export function real(p: string) {
   try {
     return realpathSync(p);
   } catch {

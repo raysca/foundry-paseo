@@ -132,6 +132,8 @@ export interface Issue {
   retries: number;
   /** When the next automatic retry starts (ISO), while one is scheduled. */
   retry_at: string | null;
+  /** Discovered work: the task whose agent reported it. */
+  found_in: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -474,6 +476,14 @@ export const MIGRATIONS: readonly string[] = [
    ALTER TABLE issues ADD COLUMN retry_at TEXT;
    ALTER TABLE attempts ADD COLUMN reason TEXT;
    ALTER TABLE attempts ADD COLUMN waiting TEXT;`,
+  // 15: follow-ups you send a running task: queued for its builder's next turn, then sent (or cancelled).
+  // Discovered work keeps the task it was found in.
+  `CREATE TABLE followups (
+     id INTEGER PRIMARY KEY, issue_key TEXT NOT NULL REFERENCES issues(key), text TEXT NOT NULL,
+     actor TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'queued', attempt_id INTEGER,
+     created_at TEXT NOT NULL DEFAULT (datetime('now')), sent_at TEXT);
+   CREATE INDEX followups_issue ON followups(issue_key, status);
+   ALTER TABLE issues ADD COLUMN found_in TEXT;`,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
@@ -899,13 +909,14 @@ export class Store {
     requirementRefs?: string[];
     profile?: string | null;
     sliceId?: number | null;
+    foundIn?: string | null;
     actor?: Actor;
   }): Issue {
     return this.tx(() => {
       const key = this.nextIssueKey(i.projectId);
       this.run(
-        `INSERT INTO issues(key,project_id,feature_id,origin,title,description,acceptance,status,priority,size,loop,checks,touches,requirement_refs,profile,slice_id)
-         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        `INSERT INTO issues(key,project_id,feature_id,origin,title,description,acceptance,status,priority,size,loop,checks,touches,requirement_refs,profile,slice_id,found_in)
+         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         key,
         i.projectId,
         i.featureId ?? null,
@@ -922,6 +933,7 @@ export class Store {
         json(i.requirementRefs ?? []),
         i.profile ?? null,
         i.sliceId ?? null,
+        i.foundIn ?? null,
       );
       this.event("issue_created", { actor: i.actor ?? "system", project: i.projectId, feature: i.featureId ?? null, issue: key, detail: { status: i.status, origin: i.origin } });
       return this.issue(key)!;
