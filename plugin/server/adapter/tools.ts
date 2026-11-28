@@ -118,7 +118,14 @@ export function buildTools(f: Foundry): ToolSet {
           size: z.enum(["S", "M", "L"]).optional(),
           // backend, frontend, bugfix, docs or a project loop in .foundry/loops; left out: the project default.
           loop: z.string().optional(),
-          checks: z.object({ scripts: z.array(z.string()).optional(), paths: z.array(z.string()).optional() }).optional(),
+          checks: z
+            .object({
+              scripts: z.array(z.string()).optional(),
+              paths: z.array(z.string()).optional(),
+              // bugfix loop: the paseo.json script that runs the reproducing test, and the test files.
+              repro: z.object({ script: z.string().optional(), files: z.array(z.string()).optional() }).optional(),
+            })
+            .optional(),
           profile: z.string().optional(),
           // Change sets (after a spec change): the existing issue an entry is about, and what happens to it.
           issue: z.string().optional(),

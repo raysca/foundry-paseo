@@ -11,6 +11,8 @@ export interface PaseoScript {
 export interface TaskChecks {
   scripts?: string[];
   paths?: string[];
+  /** For a repro step: the script that runs the reproducing test, and the files that hold it. */
+  repro?: { script?: string; files?: string[] };
 }
 
 /** paseo.json scripts of type "script" at a ref. */
@@ -61,4 +63,21 @@ export async function filesFromBase(repo: string, baseRef: string, scripts: Pase
 
 export function tail(text: string, chars = 4000) {
   return text.length > chars ? text.slice(-chars) : text;
+}
+
+/** Test files by name: tests/, test/, __tests__/, spec/ folders, *.test.* and *.spec.* files, test_*.py. */
+export const TEST_FILE = /(^|\/)(tests?|__tests__|spec)\/|[._-](test|spec)\.[a-z0-9]+$|(^|\/)test_[^/]+\.py$|_test\.go$/i;
+
+/**
+ * The script a repro step runs: the step's, else the task's repro script, else the task's first check,
+ * else paseo.json's "test", else its first script. Null when paseo.json has no scripts.
+ */
+export function reproScript(step: Extract<LoopStep, { kind: "repro" }>, task: TaskChecks, available: PaseoScript[]): string | null {
+  return step.script ?? task.repro?.script ?? task.scripts?.[0] ?? (available.some((s) => s.name === "test") ? "test" : (available[0]?.name ?? null));
+}
+
+/** Split a change into the test that reproduces the bug and the fix. Deleted files never count as tests. */
+export function splitRepro(changed: { status: string; path: string }[], files?: string[]) {
+  const isTest = (c: { status: string; path: string }) => c.status !== "D" && (files?.length ? files.includes(c.path) : TEST_FILE.test(c.path));
+  return { tests: changed.filter(isTest), fix: changed.filter((c) => !isTest(c)) };
 }

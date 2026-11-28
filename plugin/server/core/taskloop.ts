@@ -4,7 +4,7 @@
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { filesFromBase, paseoScripts, resolveChecks, tail, type TaskChecks } from "./checks";
+import { filesFromBase, paseoScripts, reproScript, resolveChecks, splitRepro, tail, type TaskChecks } from "./checks";
 import { assertIntegrationUntouched, featureDir, steering } from "./features";
 import { frontSlice, mergeForward, setTargetHead, sliceAllowsAutoStart, sliceOfIssue, target } from "./slices";
 import { changedPaths, commitAll, FOUNDRY_IDENT, git, head, HOST_IDENT, identEnv, sh, treeOf } from "./git";
@@ -312,8 +312,8 @@ export class TaskLoop {
       if (a.ended_at) return;
       const step = loop.steps[a.step_index];
       if (!step) return this.finish(a);
-      if (step.kind === "check") {
-        const r = await this.runCheckStep(a, step);
+      if (step.kind === "check" || step.kind === "repro") {
+        const r = step.kind === "check" ? await this.runCheckStep(a, step) : await this.runReproStep(a, step);
         if (r === "passed" || r === "skipped") {
           this.store.updateAttempt(a.id, { step_index: a.step_index + 1 });
           continue;
@@ -343,26 +343,7 @@ export class TaskLoop {
     }
     this.store.updateAttempt(a.id, { step: "check" });
 
-    // A per-attempt check workspace at the committed SHA (Paseo runs setup when it creates it), with
-    // paseo.json and the files its commands name restored from base so a task can't weaken its checks.
-    let ws = a.check_workspace_id;
-    let path = a.check_path;
-    if (!ws || !path || !existsSync(path)) {
-      const made = await this.host.createWorktreeWorkspace({
-        repo: p.repo,
-        title: `${i.key} checks`,
-        slug: `${i.key.toLowerCase()}-check-${a.n}`,
-        from: sha,
-        purpose: "check",
-        visible: false,
-      });
-      this.store.recordBranch(p.repo, made.branch, "check");
-      ws = made.workspaceId;
-      path = made.path;
-      this.store.updateAttempt(a.id, { check_workspace_id: ws, check_path: path });
-    }
-    await git(path, "checkout", "-q", "--detach", "--force", sha);
-    await git(path, "clean", "-fdq");
+    const { ws, path } = await this.checkWorkspace(a, i, p, sha);
     const fromBase = await filesFromBase(p.repo, p.base_ref, checks.scripts);
     await git(path, "checkout", "-q", p.base_ref, "--", ...fromBase);
 
@@ -386,32 +367,157 @@ export class TaskLoop {
     }
     if (!failures.length && !missing.length) return "passed";
 
+    return this.fixOrEnd(a, step, sha, {
+      flag: "CHECKS_FAILED",
+      what: "checks",
+      names: failures.map((f) => f.name),
+      missing,
+      lines: [
+        ...failures.map((f) => `Check "${f.name}" exited ${f.code}. Last output:\n${tail(f.output, 4000)}`),
+        ...(missing.length ? [`Required paths missing: ${missing.join(", ")}`] : []),
+      ],
+    });
+  }
+
+  /**
+   * A per-attempt check workspace at the committed SHA (Paseo runs setup when it creates it), reset
+   * to the SHA. Callers restore paseo.json and the files its commands name from base, so a task can't
+   * weaken its checks.
+   */
+  private async checkWorkspace(a: Attempt, i: Issue, p: { repo: string }, sha: string): Promise<{ ws: string; path: string }> {
+    let ws = a.check_workspace_id;
+    let path = a.check_path;
+    if (!ws || !path || !existsSync(path)) {
+      const made = await this.host.createWorktreeWorkspace({
+        repo: p.repo,
+        title: `${i.key} checks`,
+        slug: `${i.key.toLowerCase()}-check-${a.n}`,
+        from: sha,
+        purpose: "check",
+        visible: false,
+      });
+      this.store.recordBranch(p.repo, made.branch, "check");
+      ws = made.workspaceId;
+      path = made.path;
+      this.store.updateAttempt(a.id, { check_workspace_id: ws, check_path: path });
+    }
+    await git(path, "checkout", "-q", "--detach", "--force", sha);
+    await git(path, "clean", "-fdq");
+    return { ws, path };
+  }
+
+  /** A failed check or repro step: another fix round for the builder within budget, else rework with the flag. */
+  private async fixOrEnd(
+    a: Attempt,
+    step: { max_fix_rounds?: number },
+    sha: string,
+    o: { flag: "CHECKS_FAILED" | "REPRO_FAILED"; what: string; names: string[]; missing?: string[]; lines: string[] },
+  ): Promise<"fixing" | "ended"> {
+    const i = this.store.issue(a.issue_key)!;
     const fresh = this.store.attempt(a.id)!;
     if (fresh.ended_at) return "ended";
+    const missing = o.missing ?? [];
     const budget = step.max_fix_rounds ?? i.max_fix_rounds ?? this.settings.maxFixRounds;
     if (fresh.fix_rounds >= budget) {
-      this.endAttempt(a.id, "rework", { flag: "CHECKS_FAILED", detail: `checks still failing after ${fresh.fix_rounds} fix round(s): ${failures.map((f) => f.name).concat(missing.map((m) => `path ${m}`)).join(", ")}` });
+      // Checks name what failed; a repro says why, since there is one step and several ways to fail it.
+      const why = o.flag === "REPRO_FAILED" ? o.lines.map((l) => l.split("\n")[0]).join(" ") : o.names.concat(missing.map((m) => `path ${m}`)).join(", ");
+      this.endAttempt(a.id, "rework", { flag: o.flag, detail: `${o.what} still failing after ${fresh.fix_rounds} fix round(s): ${why}` });
       return "ended";
     }
     const round = fresh.fix_rounds + 1;
     this.store.updateAttempt(a.id, { step: "fix", fix_rounds: round });
-    this.store.event("fix_round", { issue: i.key, attempt: a.id, detail: { round, checks: failures.map((f) => f.name), missing } });
+    this.store.event("fix_round", { issue: i.key, attempt: a.id, detail: { round, checks: o.names, missing } });
     this.store.startRun("fix", { attempt: a.id, agent: a.builder_agent_id, sha, detail: { round } });
-    const msg = [
-      `Foundry's checks failed on commit ${sha.slice(0, 10)} (fix round ${round} of ${budget}). Fix only these, then end your turn. Do not commit.`,
-      ...failures.map((f) => `Check "${f.name}" exited ${f.code}. Last output:\n${tail(f.output, 4000)}`),
-      ...(missing.length ? [`Required paths missing: ${missing.join(", ")}`] : []),
-    ].join("\n\n");
+    const msg = [`Foundry's ${o.what} failed on commit ${sha.slice(0, 10)} (fix round ${round} of ${budget}). Fix only these, then end your turn. Do not commit.`, ...o.lines].join("\n\n");
     await this.host.send(a.builder_agent_id!, msg);
     return "fixing";
+  }
+
+  /** The commit the attempt's change starts from: where it forked from its target branch. */
+  private async forkOf(a: Attempt, i: Issue, p: { repo: string; base_ref: string }) {
+    const f = i.feature_id ? target(this.store, i.feature_id, sliceOfIssue(this.store, i)?.id ?? null).view : null;
+    const baseRef = f ? f.branch : p.base_ref;
+    const fork = await git(p.repo, "merge-base", baseRef, a.head_sha!).catch(() => baseRef);
+    return { f, baseRef, fork };
+  }
+
+  /**
+   * A bug's reproduction. The change must add or edit a test and change something else (the fix).
+   * In the check workspace the fix is reverted to the fork point and the test script must fail; with
+   * the fix back it must pass. Both runs are recorded as checks so the reviewer and the review panel
+   * see them. Anything else goes back to the builder as a fix round, then REPRO_FAILED rework.
+   */
+  private async runReproStep(a: Attempt, step: Extract<LoopStep, { kind: "repro" }>): Promise<"passed" | "skipped" | "fixing" | "ended"> {
+    const i = this.store.issue(a.issue_key)!;
+    const p = this.store.project(i.project_id)!;
+    if (!a.head_sha) throw new Error(`${a.issue_key} has no commit to check`);
+    const sha = a.head_sha;
+    const available = await paseoScripts(p.repo, p.base_ref);
+    const task = parse<TaskChecks>(i.checks, {});
+    const name = reproScript(step, task, available);
+    if (!name) {
+      this.store.event("check_skipped", { issue: i.key, attempt: a.id, detail: { step: step.name, hint: 'Add a test script of type "script" to paseo.json to reproduce bugs.' } });
+      return "skipped";
+    }
+    this.store.updateAttempt(a.id, { step: "check" });
+    const fail = (lines: string[]) => this.fixOrEnd(a, step, sha, { flag: "REPRO_FAILED", what: "bug reproduction", names: [step.name], lines });
+    const script = available.find((s) => s.name === name);
+    if (!script) return fail([`paseo.json has no script "${name}" on ${p.base_ref} to run the reproducing test.`]);
+
+    const { fork } = await this.forkOf(a, i, p);
+    const raw = await git(p.repo, "diff", "--name-status", "--no-renames", fork, sha);
+    const changed = raw
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => {
+        const [status, ...rest] = l.split("\t");
+        return { status: status!.charAt(0), path: rest.join("\t") };
+      });
+    const { tests, fix } = splitRepro(changed, task.repro?.files);
+    if (!tests.length)
+      return fail([
+        task.repro?.files?.length
+          ? `The change doesn't touch the reproducing test the task names (${task.repro.files.join(", ")}). Add a test there that fails without your fix.`
+          : "No test reproduces the bug: the change adds or edits no test file (a file under test/, tests/, __tests__/ or spec/, or named *.test.*, *.spec.*, test_*.py or *_test.go). Add a test that fails without your fix.",
+      ]);
+    if (!fix.length) return fail([`Only tests changed (${tests.map((t) => t.path).join(", ")}). A bug fix changes the code too.`]);
+
+    const { ws, path } = await this.checkWorkspace(a, i, p, sha);
+    const fromBase = await filesFromBase(p.repo, p.base_ref, [script]);
+    const timeoutMs = step.timeout_minutes ? step.timeout_minutes * 60_000 : this.settings.checkTimeoutMs;
+    const runOnce = async (label: string, expect: "fail" | "pass") => {
+      await git(path, "checkout", "-q", p.base_ref, "--", ...fromBase);
+      const runId = this.store.startRun("check", { attempt: a.id, sha, detail: { name: label, command: script.command, repro: expect } });
+      const r = await this.host.runScript({ workspaceId: ws, script: script.name, env: {}, timeoutMs });
+      const ok = expect === "fail" ? r.code !== 0 : r.code === 0;
+      this.store.endRun(runId, ok ? "passed" : "failed", { code: r.code, tail: tail(r.output, 4000), terminal: r.terminalId });
+      if (a.builder_agent_id)
+        void this.host.timeline(a.builder_agent_id, `foundry-check-${runId}`, { step: "check", name: label, status: ok ? "passed" : "failed", code: r.code, sha, tail: tail(r.output, 1200) });
+      return { ok, ...r };
+    };
+
+    // Without the fix: added files go, everything else goes back to the fork point. The tests stay.
+    const added = fix.filter((c) => c.status === "A").map((c) => c.path);
+    const reverted = fix.filter((c) => c.status !== "A").map((c) => c.path);
+    if (added.length) await git(path, "rm", "-q", "-f", "--", ...added);
+    if (reverted.length) await git(path, "checkout", "-q", fork, "--", ...reverted);
+    const without = await runOnce(`${step.name}: without the fix (expected to fail)`, "fail");
+    await git(path, "checkout", "-q", "--detach", "--force", sha);
+    await git(path, "clean", "-fdq");
+    const withFix = await runOnce(`${step.name}: with the fix`, "pass");
+
+    const lines: string[] = [];
+    const testList = tests.map((t) => t.path).join(", ");
+    if (!without.ok) lines.push(`"${name}" passes with your fix reverted (${fix.map((c) => c.path).join(", ")}), so ${testList} doesn't reproduce the bug. Make the test fail on the code as it was.`);
+    if (!withFix.ok) lines.push(`"${name}" fails with your fix (exit ${withFix.code}). Last output:\n${tail(withFix.output, 4000)}`);
+    if (!lines.length) return "passed";
+    return fail(lines);
   }
 
   private async startReview(a: Attempt, step: Extract<LoopStep, { kind: "review" }>) {
     const i = this.store.issue(a.issue_key)!;
     const p = this.store.project(i.project_id)!;
-    const f = i.feature_id ? target(this.store, i.feature_id, sliceOfIssue(this.store, i)?.id ?? null).view : null;
-    const baseRef = f ? f.branch : p.base_ref;
-    const fork = await git(p.repo, "merge-base", baseRef, a.head_sha!).catch(() => baseRef);
+    const { f, baseRef, fork } = await this.forkOf(a, i, p);
     const diff = await git(p.repo, "diff", `${fork}..${a.head_sha}`).catch((e) => String(e));
     const checkRuns = this.store.runs(a.id).filter((r) => r.kind === "check");
     const checkLines = checkRuns.slice(-12).map((r) => `- ${parse<{ name?: string }>(r.detail, {}).name ?? "check"}: ${r.status}`);
