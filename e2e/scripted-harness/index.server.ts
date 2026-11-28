@@ -178,7 +178,12 @@ async function script(s: Session, text: string): Promise<string> {
   // Verify: the reviewer reports on every requirement listed in its prompt.
   if (text.includes("reviewer verifying the feature")) {
     const refs = [...text.matchAll(/^- (R[\d.]+) /gm)].map((m) => m[1]!);
-    const r = await call(s, "report_requirements", { results: refs.map((ref) => ({ requirement_ref: ref, passed: true, evidence: `Read the code and tests for ${ref}.` })) });
+    // FAKE_FAIL_REQ_ONCE=R3 fails that requirement the first time a Verify lists it (the M2 exit test).
+    const failRef = process.env.FAKE_FAIL_REQ_ONCE;
+    const fail = (ref: string) => ref === failRef && !failedOnce.has(ref) && (failedOnce.add(ref), true);
+    const r = await call(s, "report_requirements", {
+      results: refs.map((ref) => (fail(ref) ? { requirement_ref: ref, passed: false, evidence: `${ref}: --loud is not in the README.` } : { requirement_ref: ref, passed: true, evidence: `Read the code and tests for ${ref}.` })),
+    });
     return `Reported ${refs.length} requirements. ${r}`;
   }
 
@@ -193,6 +198,10 @@ async function script(s: Session, text: string): Promise<string> {
     write(cwd, "shout/core.py", "def shout(text):\n    return text.upper() + \"!\"\n");
     write(cwd, "tests/test_core.py", "import unittest\n\nfrom shout.core import shout\n\n\nclass ShoutTest(unittest.TestCase):\n    def test_shout(self):\n        self.assertEqual(shout(\"hi\"), \"HI!\")\n");
     return "Added shout() with a test.";
+  }
+  if (task && /^Document/.test(task[2]!)) {
+    write(cwd, "docs/loud.md", "# --loud\n\nAn alias of --shout.\n");
+    return "Documented --loud.";
   }
   if (task && /--loud/.test(task[2]!)) return implementLoud(cwd);
   if ((task && /flag/.test(task[2]!)) || text.includes("ask me again")) {
@@ -277,6 +286,8 @@ const SHOUT_REQS = [
   { ref: "R2", title: "CLI flag", acceptance_criteria: ["WHERE --shout is given THE CLI SHALL print the shouted text"] },
 ];
 const LOUD_REQ = { ref: "R3", title: "Loud alias", acceptance_criteria: ["WHERE --loud is given THE CLI SHALL behave as with --shout"] };
+
+const failedOnce = new Set<string>();
 
 function implementLoud(cwd: string) {
   const p = join(cwd, "shout/cli.py");

@@ -15,7 +15,8 @@ Foundry owns only the workflow: features, specs, requirements, the task graph, i
 SHA-bound reviews, cards and the ledger, in a SQLite store inside the plugin process.
 
 The behaviour spec and the milestone plan live in the project's Claude Docs. This repo is built
-milestone by milestone; Milestone 1 is a thin vertical slice of both loops and the PM.
+milestone by milestone: Milestone 1 is a thin vertical slice of both loops and the PM, and Milestone 2
+completes loop 1 (the Quick flow, line comments, editing a spec at any stage, Ship by GitHub PR).
 
 ## Layout
 
@@ -46,7 +47,8 @@ HARNESS=claude bash e2e/smoke.sh  # real Claude Code, on a Mac
 bash e2e/loop2.sh                 # loop 2: two tasks through checks, review, a question and accept; PM chat and a card
 bash e2e/loop1.sh                 # loop 1: idea to approved task list, its tasks, Verify, then Ship by local merge
 bash e2e/quick.sh                 # Quick flow: spec, plan and task list in one turn, approved once
-bash e2e/ship-pr.sh               # Ship by GitHub PR with a fake gh: PR opened, a push re-verifies, merged moves to Done
+bash e2e/ship-pr.sh               # M2 exit test: Ship by GitHub PR with a fake gh, then reopen the Done feature by
+                                  # editing its spec, turn a failed Verify requirement into a task, merge a second PR
 bash e2e/exit.sh                  # M1 exit test: loop 1 with a spec edit during Build, through Verify and Ship
 bash e2e/ui.sh                    # the same scenario clicked through Foundry's screens in Paseo's web app (needs Playwright)
 ```

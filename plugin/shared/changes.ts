@@ -9,12 +9,20 @@ export interface Change {
 
 export const CHANGES: Change[] = [
   {
+    version: "0.4.0",
+    notes: [
+      "Ship by GitHub pull request: Prepare pushes the feature branch and opens a PR with gh when the repo has a remote. Foundry checks the PR every 5 minutes, moves the feature to Done when it merges, and verifies again when new commits arrive. Projects you already had keep merging locally; change it on the project page.",
+      "Edit the spec of a feature in Verify, Ship or Done. In Verify or Ship, approving the change set sends the feature back to Build when tasks changed, or straight to Verify. A Done feature reopens on a new branch from base (shout-mode-r2), and only what changed becomes new tasks.",
+      "A task the spec changed under is flagged at review: accept it as is, rework it with a drafted message naming the new requirements, or cancel it.",
+      "Filter the features list by bucket, status and spec changed.",
+    ],
+  },
+  {
     version: "0.3.0",
     notes: [
       "Quick flow: pick it when you create a feature, and the project manager writes the spec, plan and task list in one turn. You approve all three at once.",
       "Comment on lines of a spec, plan or task list, then send your comments with a revision request. The project manager can comment back, you resolve comments when they are dealt with, and a comment follows its line to the next revision when that line is unchanged. Approve warns you while comments are still open.",
       "Each doc lists its revisions and shows the diff between any two.",
-      "Ship by GitHub pull request: Prepare pushes the feature branch and opens a PR with gh when the repo has a remote. Foundry checks the PR every 5 minutes, moves the feature to Done when it merges, and verifies again when new commits arrive. Projects you already had keep merging locally; change it on the project page.",
       "Paseo now names the branches of Foundry's workspaces (for example shout-mode or sht-1) instead of Foundry's own foundry/... names.",
     ],
   },

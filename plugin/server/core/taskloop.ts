@@ -651,6 +651,9 @@ export class TaskLoop {
           this.store.run("INSERT INTO reviews(attempt_id,actor,decision,head_sha,tree_sha,feedback) VALUES(?,?,?,?,?,?)", a.id, actor, "accept", headSha, treeSha, feedback);
           this.store.setIssueStatus(key, "Done", actor, null, { merged });
           this.store.event("task_merged", { actor, issue: key, attempt: a.id, feature: f.id, detail: { head: headSha, merged } });
+          // Accepted as is with the spec changed under it: the flag stays, so its requirements stay not
+          // covered and Verify reports them; a stale task cannot ship silently.
+          if (i.flag === "SPEC_CHANGED") this.store.event("flag_accepted_as_is", { actor, issue: key, feature: f.id, detail: { refs: parse<string[]>(i.requirement_refs, []) } });
         });
         for (const ws of [a.workspace_id, a.check_workspace_id]) if (ws) void this.host.archiveWorkspace(ws).catch(() => {});
         return { merged };
@@ -679,6 +682,49 @@ export class TaskLoop {
       this.store.run("INSERT INTO reviews(attempt_id,actor,decision,head_sha,tree_sha,feedback) VALUES(?,?,?,?,?,?)", a.id, actor, "rework", headSha, treeSha, feedback);
     });
     await this.continueInSession(key, `The developer reviewed your work at ${headSha} and asks for changes:\n\n${feedback}\n\nMake the changes, then end your turn. Do not commit.`, actor, "rework");
+    return { ok: true };
+  }
+
+  /**
+   * A task flagged SPEC_CHANGED at review: the rework Foundry drafts for you, naming the requirements it
+   * covers as they read now and what changed in them.
+   */
+  flagDraft(key: string) {
+    const i = this.store.issue(key);
+    if (!i) throw new FoundryError("NOT_FOUND", `No issue ${key}`);
+    if (i.flag !== "SPEC_CHANGED" || !i.feature_id) throw new FoundryError("NOT_FLAGGED", `${key} is not flagged for a spec change`);
+    const refs = parse<string[]>(i.requirement_refs, []);
+    const change = this.store.get<{ diff: string }>("SELECT diff FROM spec_changes WHERE feature_id=? AND status='approved' ORDER BY id DESC LIMIT 1", i.feature_id);
+    const d = parse<{ changed?: string[]; removed?: string[]; base?: { ref: string; title: string; criteria: string[] }[] }>(change?.diff, {});
+    const now = new Map(this.store.requirements(i.feature_id).map((r) => [r.ref, r]));
+    const lines = ["The spec changed while you worked on this task. Bring your work in line with the requirements as they read now:", ""];
+    for (const ref of refs) {
+      const r = now.get(ref);
+      if (!r || d.removed?.includes(ref)) {
+        lines.push(`- ${ref} was removed from the spec: take out anything you added only for it.`);
+        continue;
+      }
+      lines.push(`- ${ref} ${r.title}${d.changed?.includes(ref) ? " (changed)" : ""}`);
+      for (const c of parse<string[]>(r.criteria, [])) lines.push(`  - ${c}`);
+      const was = d.changed?.includes(ref) ? d.base?.find((b) => b.ref === ref) : null;
+      if (was) lines.push(`  Before the change it read: ${was.title}; ${was.criteria.join("; ")}`);
+    }
+    return { feedback: lines.join("\n") };
+  }
+
+  /** Cancel a flagged task at review, at the SHAs you read: the spec moved on and its work is not wanted. */
+  async cancelAtReview(key: string, headSha: string, treeSha: string, actor: Actor = "you") {
+    const a = await this.locks.with(`attempt:${key}`, async () => {
+      const { i, a } = await this.assertReviewable(key, headSha, treeSha);
+      if (i.flag !== "SPEC_CHANGED") throw new FoundryError("NOT_FLAGGED", `${key} is not flagged for a spec change; ask the project manager to cancel it`);
+      this.store.tx(() => {
+        this.store.run("INSERT INTO reviews(attempt_id,actor,decision,head_sha,tree_sha,feedback) VALUES(?,?,?,?,?,?)", a.id, actor, "cancel", headSha, treeSha, "");
+        this.store.setIssueStatus(key, "Cancelled", actor, null, { why: "spec change", head: headSha });
+      });
+      return a;
+    });
+    for (const ws of [a.workspace_id, a.check_workspace_id]) if (ws) void this.host.archiveWorkspace(ws).catch(() => {});
+    await this.tick();
     return { ok: true };
   }
 

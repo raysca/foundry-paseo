@@ -4,7 +4,8 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { ensureIntegration, featureDir, steering, uniqueSlug } from "./features";
+import { ensureIntegration, featureDir, reopenOnBase, steering, uniqueSlug, type Reopened } from "./features";
+import { firstRemote } from "./github";
 import { changedPaths, commitAll, FOUNDRY_IDENT, git, head, HOST_IDENT, PM_IDENT, sh } from "./git";
 import { diffRequirements, lintRequirements, renumbered, validateChangeSet, type RequirementDiff, renderRequirements, withRequirements, renderTasks, validateTasks, type GraphResult, type ProposedRequirement, type ProposedTask } from "./graph";
 import type { Host } from "./host";
@@ -514,10 +515,10 @@ export class Planning {
   }
 
   // ---------- your actions ----------
-  private editable(featureId: number) {
+  private editable(featureId: number, o: { done?: boolean } = {}) {
     const f = this.store.feature(featureId);
     if (!f) throw new FoundryError("NOT_FOUND", `No feature ${featureId}`);
-    if (f.status === "cancelled" || f.stage === "done") throw new FoundryError("FEATURE_CLOSED", `This feature is ${f.status === "cancelled" ? "cancelled" : "done"}`);
+    if (f.status === "cancelled" || (f.stage === "done" && !o.done)) throw new FoundryError("FEATURE_CLOSED", `This feature is ${f.status === "cancelled" ? "cancelled" : "done"}`);
     if (this.turns.has(f.id)) throw new FoundryError("FEATURE_BUSY", "The project manager is working on this feature");
     return f;
   }
@@ -861,19 +862,31 @@ export class Planning {
   // ---------- your edits and spec changes ----------
   /**
    * Your edit to the spec or plan, committed in the integration worktree. Before Build it sends the
-   * feature back to that doc's stage; in Build an edit to the spec opens a spec change, which pauses
-   * auto-start until you approve its change set or discard it.
+   * feature back to that doc's stage. From Build on, an edit to the spec opens a spec change, which pauses
+   * auto-start (and Prepare and Accept in Ship) until you approve its change set or discard it. A Done
+   * feature reopens: a new branch from base, back to Spec, and only the delta becomes new tasks.
    */
   async editDoc(featureId: number, kind: "spec" | "plan", text: string, baseSha: string, actor: Actor = "you") {
     const r = await this.locks.with(`feature:${featureId}`, async () => {
-      const f = this.editable(featureId);
-      const d = this.store.doc(f.id, kind)!;
-      if (!d.head_sha) throw new FoundryError("NOT_FOUND", `There is no ${kind} to edit yet`);
-      if (d.head_sha !== baseSha) throw new FoundryError("STALE_EDIT", "It changed since you read it", { head_sha: d.head_sha });
-      const building = ["build"].includes(f.stage);
-      if (["verify", "ship", "done"].includes(f.stage)) throw new FoundryError("NOT_SUPPORTED_YET", "Editing a feature in Verify, Ship or Done arrives with Verify and Ship.");
+      let f = this.editable(featureId, { done: kind === "spec" });
+      const d0 = this.store.doc(f.id, kind)!;
+      if (!d0.head_sha) throw new FoundryError("NOT_FOUND", `There is no ${kind} to edit yet`);
+      if (d0.head_sha !== baseSha) throw new FoundryError("STALE_EDIT", "It changed since you read it", { head_sha: d0.head_sha });
+      // From Build on, tasks exist: a spec edit is a spec change and is answered with a change set.
+      const afterTasks = ["build", "verify", "ship", "done"].includes(f.stage);
+      if (["verify", "ship"].includes(f.stage) && this.store.get<{ status: string }>("SELECT status FROM verifications WHERE feature_id=? ORDER BY id DESC LIMIT 1", f.id)?.status === "running")
+        throw new FoundryError("FEATURE_BUSY", "Verify is running on this feature; edit once it reports");
       if (kind === "spec" && f.stage === "clarify") throw new FoundryError("WRONG_STAGE", "The spec is still being written");
-      if (kind === "plan" && !["plan", "tasks"].includes(f.stage)) throw new FoundryError(building ? "NOT_SUPPORTED_YET" : "WRONG_STAGE", building ? "Plan edits during Build arrive later; edit the spec instead." : "There is no plan to edit yet");
+      if (kind === "plan" && !["plan", "tasks"].includes(f.stage)) throw new FoundryError(afterTasks ? "NOT_SUPPORTED_YET" : "WRONG_STAGE", afterTasks ? "Plan edits after the task list is approved arrive later; edit the spec instead." : "There is no plan to edit yet");
+      let reopened: Reopened | null = null;
+      if (f.stage === "done") {
+        const text0 = await git(f.integration_path!, "show", `${d0.head_sha}:${featureDir(f.slug)}/${DOC_FILES.spec}`).catch(() => null);
+        if (text0 !== null && text0.replace(/\n$/, "") === text.replace(/\n$/, "")) return { changed: false } as const;
+        const out = await reopenOnBase(this.store, this.host, f.id, firstRemote);
+        f = out.feature;
+        reopened = out.previous;
+      }
+      const d = this.store.doc(f.id, kind)!;
       const rel = `${featureDir(f.slug)}/${DOC_FILES[kind]}`;
       const file = join(f.integration_path!, rel);
       const before = existsSync(file) ? readFileSync(file, "utf8") : "";
@@ -889,19 +902,21 @@ export class Planning {
         const later: DocKind[] = kind === "spec" ? ["plan", "tasks"] : ["tasks"];
         if (wasApproved || d.status === "in_review")
           for (const k of later) if (["approved", "in_review"].includes(this.store.doc(f.id, k)!.status)) this.store.updateDoc(f.id, k, { status: "stale" });
-        if (!building) {
+        if (!afterTasks) {
           this.store.run("UPDATE task_proposals SET status='superseded' WHERE feature_id=? AND status='proposed'", f.id);
           // The Quick flow has no Spec or Plan stage to go back to: it stays in Tasks and re-proposes.
           if (!this.quick(f) && kind === "spec" && f.stage !== "spec") this.store.setStage(f.id, "spec", actor);
           if (!this.quick(f) && kind === "plan" && f.stage === "tasks") this.store.setStage(f.id, "plan", actor);
         } else if (!this.store.openSpecChange(f.id)) {
-          this.store.run("INSERT INTO spec_changes(feature_id,base_spec_sha,diff) VALUES(?,?,?)", f.id, d.approved_sha, JSON.stringify({ base: this.approvedList(f.id) }));
+          this.store.run("INSERT INTO spec_changes(feature_id,base_spec_sha,diff) VALUES(?,?,?)", f.id, d.approved_sha, JSON.stringify({ base: this.approvedList(f.id), from_stage: f.stage, ...(reopened ? { reopened } : {}) }));
           this.store.updateFeature(f.id, { spec_change_open: 1 });
-          this.store.event("spec_change_opened", { actor, project: f.project_id, feature: f.id, detail: { base: d.approved_sha } });
+          // A reopened feature is back in Spec; Verify and Ship keep their stage until the change set is approved.
+          if (reopened) this.store.setStage(f.id, "spec", actor);
+          this.store.event("spec_change_opened", { actor, project: f.project_id, feature: f.id, detail: { base: d.approved_sha, from_stage: f.stage, round: f.round } });
         }
       });
       await this.carryComments(f.id);
-      return { changed: true, sha: commit, building, quick: this.quick(f) && !building } as const;
+      return { changed: true, sha: commit, building: afterTasks, quick: this.quick(f) && !afterTasks } as const;
     });
     if (r.changed && r.quick) {
       const dir = featureDir(this.store.feature(featureId)!.slug);
@@ -946,7 +961,7 @@ export class Planning {
         this.store.updateDoc(f.id, "plan", { status: "approved", approved_sha: plan.head_sha });
         this.store.run("UPDATE requirements SET spec_sha=? WHERE feature_id=? AND retired=0", sha, f.id);
         this.store.approveRequirements(f.id);
-        this.store.run("UPDATE spec_changes SET diff=? WHERE id=?", JSON.stringify({ base, ...diff }), change.id);
+        this.store.run("UPDATE spec_changes SET diff=? WHERE id=?", JSON.stringify({ ...parse<object>(change.diff, {}), base, ...diff }), change.id);
         this.store.event("doc_approved", { actor, project: f.project_id, feature: f.id, detail: { doc: "spec", sha, change: change.id, diff } });
       });
       return diff;
@@ -994,7 +1009,7 @@ export class Planning {
       const prop = this.store.proposal(f.id);
       if (!change || !prop || prop.kind !== "change" || prop.id !== proposalId) throw new FoundryError("PROPOSAL_CHANGED", "The change set changed: review the current one", { current: prop?.id ?? null });
       this.assertDoc(f, "tasks", sha);
-      const diff = parse<RequirementDiff & { base?: { ref: string; title: string; criteria: string[] }[] }>(change.diff, { unchanged: [], changed: [], added: [], removed: [] });
+      const diff = parse<RequirementDiff & { base?: { ref: string; title: string; criteria: string[] }[]; reopened?: Reopened }>(change.diff, { unchanged: [], changed: [], added: [], removed: [] });
       const entries = parse<ProposedTask[]>(prop.tasks, []);
       const existing = this.store.issues({ featureId: f.id }).map((i) => ({ key: i.key, status: i.status, requirement_refs: parse<string[]>(i.requirement_refs, []), touches: parse<string[]>(i.touches, []) }));
       const g = validateChangeSet(entries, diff, existing, this.unfinishedIssues(f).filter((o) => !existing.some((e) => e.key === o.key)));
@@ -1049,11 +1064,19 @@ export class Planning {
         this.store.updateDoc(f.id, "tasks", { status: "approved", approved_sha: sha });
         this.store.updateFeature(f.id, { spec_change_open: 0 });
         this.store.event("change_set_approved", { actor, project: f.project_id, feature: f.id, detail: { change: change.id, proposal: prop.id, applied } });
-        return applied;
+        // From Verify, Ship or a reopened Done: back to Build. With no task to build, Build ends at once
+        // and Verify runs again, because the requirement set moved on. A prepared local merge is dropped;
+        // an open PR stays open and gets the new commits at the next Prepare.
+        if (f.stage !== "build") {
+          this.store.setSetting(`ship:${f.id}`, "");
+          this.store.setStage(f.id, "build", actor);
+        }
+        return { applied, retire: diff.reopened?.workspace_id ?? null };
       });
     });
+    if (out.retire) void this.host.archiveWorkspace(out.retire).catch(() => {});
     await this.onBuild();
-    return { applied: out };
+    return { applied: out.applied };
   }
 
   /** Discard an open spec change: the approved spec comes back as a new commit and everything resumes. */
@@ -1062,6 +1085,8 @@ export class Planning {
       const f = this.editable(featureId);
       const change = this.store.openSpecChange(f.id);
       if (!change) throw new FoundryError("NO_SPEC_CHANGE", "There is no open spec change");
+      const meta = parse<{ base?: { ref: string; title: string; criteria: string[] }[]; reopened?: Reopened }>(change.diff, {});
+      if (meta.reopened) return this.discardReopen(f, change.id, change.base_spec_sha, meta.base ?? [], meta.reopened, actor);
       const rel = `${featureDir(f.slug)}/${DOC_FILES.spec}`;
       const text = await git(f.integration_path!, "show", `${change.base_spec_sha}:${rel}`);
       writeFileSync(join(f.integration_path!, rel), text + "\n");
@@ -1090,6 +1115,25 @@ export class Planning {
     });
     await this.onBuild();
     return this.store.feature(featureId)!;
+  }
+
+  /** Discarding the change that reopened a Done feature: back to Done on its shipped branch; the new branch's workspace is archived. */
+  private discardReopen(f: Feature, changeId: number, baseSpecSha: string | null, base: { ref: string; title: string; criteria: string[] }[], prev: Reopened, actor: Actor) {
+    const dropped = f.integration_workspace_id;
+    this.store.tx(() => {
+      this.store.updateFeature(f.id, { branch: prev.branch, integration_workspace_id: prev.workspace_id, integration_path: prev.path, head_sha: prev.head_sha, round: prev.round, planner_agent_id: prev.planner_agent_id ?? null, spec_change_open: 0 });
+      this.store.setRequirements(f.id, base, baseSpecSha);
+      this.store.approveRequirements(f.id);
+      for (const k of ["spec", "plan", "tasks"] as DocKind[]) {
+        const d = this.store.doc(f.id, k)!;
+        if (d.approved_sha) this.store.updateDoc(f.id, k, { status: "approved", head_sha: d.approved_sha });
+      }
+      this.store.run("UPDATE task_proposals SET status='superseded' WHERE feature_id=? AND status='proposed' AND kind='change'", f.id);
+      this.store.run("UPDATE spec_changes SET status='discarded', decided_at=datetime('now') WHERE id=?", changeId);
+      this.store.setStage(f.id, "done", actor);
+      this.store.event("spec_change_discarded", { actor, project: f.project_id, feature: f.id, detail: { change: changeId, reopen: true, branch: prev.branch } });
+    });
+    if (dropped && dropped !== prev.workspace_id) void this.host.archiveWorkspace(dropped).catch(() => {});
   }
 
   async recover() {

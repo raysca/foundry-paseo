@@ -85,6 +85,7 @@ export class Delivery {
     if (!f0) throw new FoundryError("NOT_FOUND", `No feature ${featureId}`);
     if (f0.status === "cancelled") throw new FoundryError("FEATURE_CLOSED", "This feature is cancelled");
     if (!["verify", "ship"].includes(f0.stage)) throw new FoundryError("WRONG_STAGE", `The feature is in ${f0.stage}; Verify runs once Build ends`);
+    if (f0.spec_change_open) throw new FoundryError("SPEC_CHANGE_OPEN", "The spec changed: approve its change set or discard it first");
     // From Ship, Verify runs again while no PR is open (for example when base moved on); a prepared local merge is dropped.
     if (f0.stage === "ship" && this.prepared(f0.id)?.pr) throw new FoundryError("PR_OPEN", "A PR is open for this feature: merge or close it on GitHub first", { url: this.prepared(f0.id)!.pr!.url });
     const r = await this.locks.with(`feature:${featureId}`, async () => {
@@ -306,6 +307,7 @@ export class Delivery {
     return this.locks.with(`feature:${featureId}`, async () => {
       const f = this.store.feature(featureId)!;
       if (f.stage !== "ship" || f.status !== "active") throw new FoundryError("WRONG_STAGE", "Prepare runs in Ship on an active feature");
+    if (f.spec_change_open) throw new FoundryError("SPEC_CHANGE_OPEN", "The spec changed: approve its change set or discard it first");
       const before = this.prepared(f.id);
       if (before?.pr) throw new FoundryError("PR_OPEN", "A PR is already open for this feature", { url: before.pr.url });
       await assertIntegrationUntouched(this.store, f);
@@ -351,6 +353,7 @@ export class Delivery {
       const f = this.store.feature(featureId)!;
       const prepared = this.prepared(f.id);
       if (f.stage !== "ship" || !prepared) throw new FoundryError("NOT_PREPARED", "Prepare the ship first");
+      if (f.spec_change_open) throw new FoundryError("SPEC_CHANGE_OPEN", "The spec changed: approve its change set or discard it first");
       if (prepared.pr) throw new FoundryError("PR_OPEN", "Merge the PR on GitHub; Foundry sees it at its next check", { url: prepared.pr.url });
       const dirty = await changedPaths(f.integration_path!);
       const cur = await head(f.integration_path!);
@@ -398,7 +401,8 @@ export class Delivery {
    */
   async refreshPrs(only?: number, actor: Actor = "system") {
     const out: { feature: number; result: string }[] = [];
-    for (const f of this.store.features().filter((x) => x.stage === "ship" && (only === undefined || x.id === only))) {
+    // While a spec change is open the PR is left alone: what it would merge is decided by the change set.
+    for (const f of this.store.features().filter((x) => x.stage === "ship" && !x.spec_change_open && (only === undefined || x.id === only))) {
       const ship = this.prepared(f.id);
       if (!ship?.pr) continue;
       const p = this.store.project(f.project_id)!;

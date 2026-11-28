@@ -63,6 +63,8 @@ export interface Feature {
   clarify_rounds: number;
   /** Why the PM's last planning turn failed, until a turn succeeds. */
   planning_error: string | null;
+  /** 1 for the first delivery; a reopened Done feature is on round 2, 3, ... (its branch gets -r<round>). */
+  round: number;
   created_at: string;
   updated_at: string;
 }
@@ -412,6 +414,8 @@ export const MIGRATIONS: readonly string[] = [
   // that already existed keep merging locally, as they did before.
   `ALTER TABLE projects ADD COLUMN ship_mode TEXT NOT NULL DEFAULT 'pr';
    UPDATE projects SET ship_mode='local_merge';`,
+  // 12: which delivery a feature is on. A Done feature whose spec you edit reopens on a new branch (round 2, 3, ...).
+  `ALTER TABLE features ADD COLUMN round INTEGER NOT NULL DEFAULT 1;`,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
