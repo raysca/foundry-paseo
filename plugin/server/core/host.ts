@@ -5,7 +5,8 @@ import type { Role } from "./model";
 
 /** Where an agent runs. */
 export type AgentPlace =
-  | { kind: "new-worktree"; repo: string; branch: string; fromRef: string; visible: boolean }
+  /** A new worktree workspace branched off `fromRef`. The host names the branch from `slug` (unique in the repo). */
+  | { kind: "new-worktree"; repo: string; slug: string; fromRef: string; visible: boolean }
   | { kind: "workspace"; workspaceId: string }
   | { kind: "directory"; path: string; visible: boolean };
 
@@ -29,6 +30,8 @@ export interface StartedAgent {
   agentId: string;
   workspaceId: string;
   path: string;
+  /** The branch the host created, for a new-worktree place. */
+  branch?: string;
 }
 
 export type AgentStatus = "running" | "idle" | "error" | "gone";
@@ -80,9 +83,15 @@ export interface Host {
   lastReply(agentId: string): Promise<string>;
 
   /** A worktree workspace on an existing branch (checkout) or a new one (branch-off from `from`). */
-  createWorktreeWorkspace(o: { repo: string; title: string; branch: string; from?: string; purpose: string; visible: boolean }): Promise<{
+  /**
+   * A hidden or visible worktree workspace. With `from`, a new branch off it that the host names from
+   * `slug` (made unique in the repo); without, a checkout of the existing `branch`. Returns the branch
+   * actually checked out.
+   */
+  createWorktreeWorkspace(o: WorktreeRequest): Promise<{
     workspaceId: string;
     path: string;
+    branch: string;
   }>;
   archiveWorkspace(workspaceId: string): Promise<void>;
   /** Run one of the project's paseo.json scripts with Paseo's script runner and wait for its exit code. */
@@ -106,6 +115,11 @@ export interface Host {
   /** Development only: ask the host to reload this plugin. */
   reloadSelf(): Promise<void>;
 }
+
+export type WorktreeRequest = { repo: string; title: string; purpose: string; visible: boolean } & (
+  | { from: string; slug: string }
+  | { branch: string; from?: undefined }
+);
 
 export interface Harness {
   id: string;

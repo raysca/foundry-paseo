@@ -1,12 +1,12 @@
 // A Host for loop tests: real git worktrees in a temp dir, scripted agents, and paseo.json scripts run
 // with `sh -c`. It stands in for Paseo the way the adapter does, so the loop under test is the real one.
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { sh } from "../server/core/git";
 import { profilesPatch, removeProfilesPatch } from "../server/adapter/profiles";
-import type { AgentSpec, Harness, Host, HostFacts, ProfileChoice, ScriptResult, StartedAgent, TimelineData } from "../server/core/host";
+import type { AgentSpec, Harness, Host, WorktreeRequest, HostFacts, ProfileChoice, ScriptResult, StartedAgent, TimelineData } from "../server/core/host";
 import type { Role } from "../server/core/model";
 import type { Store } from "../server/core/store";
 
@@ -80,10 +80,12 @@ export class FakeHost implements Host {
     if (this.failStart) throw new Error("provider unavailable");
     let workspaceId: string;
     let path: string;
+    let branch: string | undefined;
     if (spec.place.kind === "new-worktree") {
-      const ws = await this.createWorktreeWorkspace({ repo: spec.place.repo, title: spec.title, branch: spec.place.branch, from: spec.place.fromRef, purpose: "task", visible: true });
+      const ws = await this.createWorktreeWorkspace({ repo: spec.place.repo, title: spec.title, slug: spec.place.slug, from: spec.place.fromRef, purpose: "task", visible: true });
       workspaceId = ws.workspaceId;
       path = ws.path;
+      branch = ws.branch;
     } else if (spec.place.kind === "workspace") {
       workspaceId = spec.place.workspaceId;
       path = this.workspaces.get(workspaceId)!.path;
@@ -102,7 +104,7 @@ export class FakeHost implements Host {
     });
     this.agents.set(spec.agentId, { role: spec.role, path, turns: 0, messages: [] });
     this.turn(spec.agentId, spec.prompt);
-    return { agentId: spec.agentId, workspaceId, path };
+    return { agentId: spec.agentId, workspaceId, path, branch };
   }
 
   async send(agentId: string, text: string) {
@@ -170,13 +172,22 @@ export class FakeHost implements Host {
     return this.replies.get(agentId) ?? "";
   }
 
-  async createWorktreeWorkspace(o: { repo: string; title: string; branch: string; from?: string; purpose: string; visible: boolean }) {
+  /** Like Paseo: a new branch is named from the slug, with -2, -3… when the name is taken. */
+  async createWorktreeWorkspace(o: WorktreeRequest) {
     const workspaceId = `ws-${++this.n}`;
     const path = join(this.root, workspaceId);
-    if (o.from) run(o.repo, "git", "worktree", "add", "-q", "-b", o.branch, path, o.from);
-    else run(o.repo, "git", "worktree", "add", "-q", path, o.branch);
-    this.workspaces.set(workspaceId, { path, purpose: o.purpose, branch: o.branch });
-    return { workspaceId, path };
+    let branch: string;
+    if (o.from !== undefined) {
+      const taken = (b: string) => spawnSync("git", ["rev-parse", "--verify", "--quiet", `refs/heads/${b}`], { cwd: o.repo }).status === 0;
+      branch = o.slug;
+      for (let n = 2; taken(branch); n++) branch = `${o.slug}-${n}`;
+      run(o.repo, "git", "worktree", "add", "-q", "-b", branch, path, o.from);
+    } else {
+      branch = o.branch;
+      run(o.repo, "git", "worktree", "add", "-q", path, o.branch);
+    }
+    this.workspaces.set(workspaceId, { path, purpose: o.purpose, branch });
+    return { workspaceId, path, branch };
   }
 
   async archiveWorkspace(workspaceId: string) {

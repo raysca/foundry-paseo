@@ -303,7 +303,7 @@ async function seedFeature(foundry: Foundry, a: SeedArgs) {
   const store = foundry.store;
   const p = store.projectByKey(a.project);
   if (!p) throw new FoundryError("NOT_FOUND", `No project ${a.project}`);
-  const f = store.createFeature({ projectId: p.id, slug: a.slug, title: a.title, idea: a.title, flow: "standard", branch: `foundry/feature/${a.slug}` });
+  const f = store.createFeature({ projectId: p.id, slug: a.slug, title: a.title, idea: a.title, flow: "standard", branch: "" });
   for (const d of store.docs(f.id)) store.updateDoc(f.id, d.kind, { status: "approved" });
   await foundry.ensureIntegration(f.id);
   const keys = store.tx(() => {

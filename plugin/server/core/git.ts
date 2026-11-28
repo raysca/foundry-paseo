@@ -88,3 +88,9 @@ export async function commitAll(cwd: string, message: string, ident = FOUNDRY_ID
   await gitEnv(cwd, identEnv(ident), ...ident, "commit", "-q", "-m", message);
   return head(cwd);
 }
+
+/** The branch checked out in a worktree ("" when detached). */
+export async function currentBranch(cwd: string): Promise<string> {
+  const b = (await git(cwd, "rev-parse", "--abbrev-ref", "HEAD")).trim();
+  return b === "HEAD" ? "" : b;
+}

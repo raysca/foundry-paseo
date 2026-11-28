@@ -169,8 +169,12 @@ export class Foundry {
     const providers = this.store.owned().filter((o) => o.kind === "provider").map((o) => o.id);
     const branches: { project: string; repo: string; branches: string[] }[] = [];
     for (const p of this.store.projects()) {
-      const out = await git(p.repo, "branch", "--list", "--format=%(refname:short)", "foundry/*").catch(() => "");
-      const list = out.split("\n").map((x) => x.trim()).filter(Boolean);
+      // Branches Foundry made that still exist (never deleted: they are yours).
+      const out = await git(p.repo, "branch", "--list", "--format=%(refname:short)").catch(() => "");
+      const existing = new Set(out.split("\n").map((x) => x.trim()).filter(Boolean));
+      const made = this.store.branchesMade(p.repo);
+      // foundry/* is how Foundry named branches before Paseo named them.
+      const list = [...existing].filter((b) => made.includes(b) || b.startsWith("foundry/")).sort();
       if (list.length) branches.push({ project: p.key, repo: p.repo, branches: list });
     }
     return {

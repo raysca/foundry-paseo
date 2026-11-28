@@ -1,5 +1,6 @@
-// Feature branches and integration workspaces. A feature owns foundry/feature/<slug>, checked out only
-// in its integration workspace (a hidden Paseo workspace; Paseo runs paseo.json setup when it makes it).
+// Feature branches and integration workspaces. A feature owns one branch, checked out only in its
+// integration workspace (a hidden Paseo workspace; Paseo runs paseo.json setup when it makes it). Paseo
+// names the branch from the feature's slug; features from before keep their foundry/feature/<slug>.
 import { git, head } from "./git";
 import type { Host } from "./host";
 import { FoundryError } from "./model";
@@ -14,14 +15,19 @@ export async function ensureIntegration(store: Store, host: Host, featureId: num
   const f = store.feature(featureId)!;
   if (f.integration_path && f.integration_workspace_id) return f;
   const p = store.project(f.project_id)!;
-  const exists = await git(p.repo, "rev-parse", "--verify", "--quiet", `refs/heads/${f.branch}`).then(
-    () => true,
-    () => false,
-  );
-  if (!exists) await git(p.repo, "branch", f.branch, p.base_ref);
-  const ws = await host.createWorktreeWorkspace({ repo: p.repo, title: `Foundry: ${f.title}`, branch: f.branch, purpose: "integration", visible: false });
+  const exists =
+    !!f.branch &&
+    (await git(p.repo, "rev-parse", "--verify", "--quiet", `refs/heads/${f.branch}`).then(
+      () => true,
+      () => false,
+    ));
+  const title = `Foundry: ${f.title}`;
+  const ws = exists
+    ? await host.createWorktreeWorkspace({ repo: p.repo, title, branch: f.branch, purpose: "integration", visible: false })
+    : await host.createWorktreeWorkspace({ repo: p.repo, title, slug: f.slug, from: p.base_ref, purpose: "integration", visible: false });
+  if (!exists) store.recordBranch(p.repo, ws.branch, "feature");
   const sha = await head(ws.path);
-  store.updateFeature(f.id, { integration_workspace_id: ws.workspaceId, integration_path: ws.path, head_sha: sha });
+  store.updateFeature(f.id, { branch: ws.branch, integration_workspace_id: ws.workspaceId, integration_path: ws.path, head_sha: sha });
   store.event("integration_ready", { project: f.project_id, feature: f.id, detail: { path: ws.path, head: sha } });
   return store.feature(f.id)!;
 }
@@ -65,7 +71,7 @@ export async function steering(repo: string, baseRef: string): Promise<string> {
   return parts.length ? `Project steering (from .foundry/steering on ${baseRef}):\n\n${parts.join("\n\n")}` : "";
 }
 
-/** A slug from a title, unique among the project's features and the repo's feature branches. */
+/** A slug from a title, unique among the project's features. (Paseo makes the branch name unique.) */
 export async function uniqueSlug(store: Store, projectId: number, repo: string, title: string): Promise<string> {
   const base =
     title
@@ -77,11 +83,6 @@ export async function uniqueSlug(store: Store, projectId: number, repo: string, 
       .replace(/-+$/, "") || "feature";
   for (let n = 1; ; n++) {
     const slug = n === 1 ? base : `${base}-${n}`;
-    if (store.featureBySlug(projectId, slug)) continue;
-    const branchTaken = await git(repo, "rev-parse", "--verify", "--quiet", `refs/heads/foundry/feature/${slug}`).then(
-      () => true,
-      () => false,
-    );
-    if (!branchTaken) return slug;
+    if (!store.featureBySlug(projectId, slug)) return slug;
   }
 }
